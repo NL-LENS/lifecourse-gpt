@@ -4,6 +4,7 @@ import math
 import pprint
 import time
 import warnings
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import timedelta
 from functools import partial
@@ -23,7 +24,7 @@ from litgpt.args import EvalArgs, LogArgs, TrainArgs
 from litgpt.config import name_to_config
 from litgpt.constants import _TORCH_EQUAL_2_7, _TORCH_EQUAL_2_8
 from litgpt.data import DataModule, TinyLlama
-from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP
+from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP, model_class
 from litgpt.parser_config import save_hyperparameters
 from litgpt.types import LoggerChoice
 from litgpt.utils import (
@@ -31,7 +32,6 @@ from litgpt.utils import (
     capture_hparams,
     check_nvlink_connectivity,
     choose_logger,
-    chunked_cross_entropy,
     copy_config_files,
     extend_checkpoint_dir,
     find_resume_path,
@@ -72,6 +72,7 @@ def setup(
     tokenizer_dir: Path | None = None,
     logger_name: LoggerChoice = "tensorboard",
     seed: int = 42,
+    prepare_data_only: bool = False,
 ):
     """Pretrain a model.
 
@@ -98,6 +99,11 @@ def setup(
             module require this.
         logger_name: The name of the logger to send metrics to.
         seed: The random seed to use for reproducibility.
+        prepare_data_only: Preprocess the dataset and exit, training nothing. Useful when
+            preprocessing is slow, needs a different machine than training, or has to
+            happen once before several runs share the result. Everything the data module
+            needs is read from the same config, so the run that trains later builds the
+            identical cache and simply finds it already there.
     """
     if model_name == "list":
         available_models = "\n".join(sorted(name_to_config))
@@ -124,11 +130,29 @@ def setup(
     data = TinyLlama() if data is None else data
 
     config = Config.from_name(model_name) if model_config is None else model_config
+    # A data module whose batches only one architecture can read says so. Checked up
+    # front because the mismatch is otherwise silent: `--model_config.*` replaces the
+    # named config wholesale, `model_class_name` included, and a plain GPT will happily
+    # fit cross entropy to a batch laid out for a different likelihood.
+    expected_class = getattr(data, "model_class_name", None)
+    if expected_class is not None and config.model_class_name != expected_class:
+        raise ValueError(
+            f"{type(data).__name__} produces batches for model_class_name={expected_class!r}, but the model "
+            f"config has {config.model_class_name!r}. `--model_config` replaces the config named by "
+            f"`model_name` entirely, so set `--model_config.model_class_name {expected_class}` as well."
+        )
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
     out_dir = init_out_dir(out_dir)
     # in case the dataset requires the Tokenizer
     tokenizer = Tokenizer(tokenizer_dir) if tokenizer_dir is not None else None
+
+    if prepare_data_only:
+        # Before the logger and Fabric: this writes a dataset, and has no business
+        # creating run directories or claiming devices.
+        data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=config.block_size)
+        data.prepare_data()
+        return
 
     logger = choose_logger(
         logger_name,
@@ -198,7 +222,7 @@ def main(
 
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
-        model = GPT(config)
+        model = model_class(config)(config)
 
     initialize_weights(fabric, model, n_layer=config.n_layer, n_embd=config.n_embd)
 
@@ -300,23 +324,23 @@ def fit(
     optimizer = state["optimizer"]
 
     if eval.initial_validation:
-        val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        val_loss = f"{val_loss:.3f}"
+        val_losses = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
     else:
         fabric.print("Verifying settings ...")
         validate(fabric, model, val_dataloader, max_iters=2, verbose=False)  # sanity check
-        val_loss = "n/a"
+        val_losses = None
 
     throughput = ThroughputMonitor(fabric, window_size=5)
 
+    arch = model_class(model.config)
     with torch.device("meta"):
-        meta_model = GPT(model.config)
-        x = torch.randint(0, 1, (train.micro_batch_size, meta_model.max_seq_length))
-        model_fwd = lambda: meta_model(x)  # noqa: F821
-        model_loss = lambda y: chunked_cross_entropy(y, x, chunk_size=0)  # noqa: F821
+        meta_model = arch(model.config)
+        example = arch.example_batch(train.micro_batch_size, meta_model.max_seq_length, model.config)
+        model_fwd = lambda: meta_model(**arch.model_inputs(example))  # noqa: F821
+        model_loss = lambda y: arch.compute_loss(y, example, model.config)["loss"]  # noqa: F821
         measured_flops = measure_flops(meta_model, model_fwd, model_loss)
         fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
-        del meta_model, x
+        del meta_model, example
 
     max_tokens_per_device = train.max_tokens // fabric.world_size
     tokens_per_iter = train.micro_batch_size * model.max_seq_length
@@ -325,9 +349,10 @@ def fit(
     initial_iter = state["iter_num"]
     train_iterator = CycleIterator(train_dataloader)
 
-    running_loss = RunningMean(window=train.gradient_accumulation_iters(devices, num_nodes), sync_on_compute=False).to(
-        fabric.device
-    )
+    # One meter per term `compute_loss` reports, created on first sight so that the loop
+    # needs no knowledge of the architecture. Components such as Delphi's `loss_ce` and
+    # `loss_dt` are tracked separately because they typically move on different scales.
+    running_losses: dict[str, RunningMean] = {}
     fabric.barrier()
     total_t0 = time.perf_counter()
 
@@ -345,16 +370,19 @@ def fit(
         state["iter_num"] += 1
         iter_t0 = time.perf_counter()
 
-        input_ids = train_data[:, 0 : model.max_seq_length].contiguous().long()
-        targets = train_data[:, 1 : (model.max_seq_length + 1)].contiguous().long()
+        batch = _unpack_batch(train_data, model.max_seq_length)
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes) != 0
         with fabric.no_backward_sync(model, enabled=is_accumulating):
-            logits = model(input_ids)
-            loss = chunked_cross_entropy(logits, targets)
-            fabric.backward(loss / train.gradient_accumulation_iters(devices, num_nodes))
+            losses = forward_loss(model, batch)
+            fabric.backward(losses["loss"] / train.gradient_accumulation_iters(devices, num_nodes))
 
-        running_loss.update(loss.detach())
+        for name, value in losses.items():
+            if name not in running_losses:
+                running_losses[name] = RunningMean(
+                    window=train.gradient_accumulation_iters(devices, num_nodes), sync_on_compute=False
+                ).to(fabric.device)
+            running_losses[name].update(value.detach())
 
         if not is_accumulating:
             fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
@@ -363,7 +391,8 @@ def fit(
             state["step_count"] += 1
 
         if state["iter_num"] % log_iter_interval == 0:
-            loss = running_loss.compute().item()  # expensive device-to-host synchronization
+            # expensive device-to-host synchronization
+            loss_values = {name: running.compute().item() for name, running in running_losses.items()}
             t1 = time.perf_counter()
             throughput.update(
                 time=(t1 - total_t0),
@@ -373,7 +402,7 @@ def fit(
                 lengths=(state["iter_num"] * train.micro_batch_size * model.max_seq_length),
             )
             metrics = {
-                "loss": loss,
+                **loss_values,
                 "iter": state["iter_num"],
                 "step": state["step_count"],
                 "epoch": train_iterator.epoch,
@@ -385,12 +414,10 @@ def fit(
                 "total_tokens": (state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size),
                 "learning_rate": lr,
             }
-            if isinstance(val_loss, float):
-                val_loss = f"{val_loss:.3f}"
             fabric.print(
                 f"Epoch {metrics['epoch'] + 1} | iter {metrics['iter']} step {metrics['step']} |"
-                f" loss train: {metrics['loss']:.3f},"
-                f" val: {val_loss} |"
+                f" loss train: {format_losses(loss_values)},"
+                f" val: {format_losses(val_losses)} |"
                 f" iter time: {metrics['iter_time'] * 1000:.2f} ms"
                 f"{' (step)' if not is_accumulating else ''}"
                 f" remaining time: {timedelta(seconds=int(metrics['remaining_time']))!s}"
@@ -402,12 +429,14 @@ def fit(
 
         if val_dataloader is not None and not is_accumulating and state["step_count"] % eval.interval == 0:
             t0 = time.perf_counter()
-            val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-            val_loss = val_loss.item()
+            val_losses = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
             td = time.perf_counter() - t0
 
-            fabric.print(f"iter {state['iter_num']}: val loss {val_loss:.4f}, val time: {td * 1000:.2f} ms")
-            metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
+            fabric.print(
+                f"iter {state['iter_num']}: val loss {format_losses(val_losses)}, val time: {td * 1000:.2f} ms"
+            )
+            metrics = {f"val_{name}": value for name, value in val_losses.items()}
+            metrics["val_ppl"] = perplexity(val_losses)
             fabric.log_dict(metrics, step=state["iter_num"] - 1)
             fabric.barrier()
 
@@ -416,35 +445,90 @@ def fit(
 
     # Final validation
     if eval.final_validation:
-        val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
+        val_losses = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
+        metrics = {f"val_{name}": value for name, value in val_losses.items()}
+        metrics["val_ppl"] = perplexity(val_losses)
         fabric.log_dict(metrics, step=state["iter_num"])
-        fabric.print(f"Final evaluation | val loss: {val_loss.item():.3f} | val ppl: {math.exp(val_loss):.3f}")
+        fabric.print(f"Final evaluation | val loss: {format_losses(val_losses)} | val ppl: {metrics['val_ppl']:.3f}")
+
+
+def _unpack_batch(batch: torch.Tensor | dict[str, torch.Tensor], max_seq_length: int) -> dict[str, torch.Tensor]:
+    """Splits one dataloader batch into model inputs and loss targets.
+
+    Text pretraining streams a flat `(B, T + 1)` block of packed tokens, so the causal
+    shift happens here. A `DataModule` that emits dicts has already shifted its samples
+    (the life-event modules must, since every token's target carries its own age), so
+    they are only cut to `max_seq_length`: `(B, T)` tensors along the sequence axis and
+    `(B, 1, T, T)` attention masks along both. `labels` is renamed to `targets`, the name
+    `compute_loss` reads for text as well.
+    """
+    if not isinstance(batch, dict):
+        return {
+            "input_ids": batch[:, 0:max_seq_length].contiguous().long(),
+            "targets": batch[:, 1 : (max_seq_length + 1)].contiguous().long(),
+        }
+
+    unpacked = {}
+    for key, value in batch.items():
+        value = value[..., :max_seq_length, :max_seq_length] if value.dim() == 4 else value[:, :max_seq_length]
+        if not value.is_floating_point() and value.dtype != torch.bool:
+            value = value.long()
+        unpacked["targets" if key == "labels" else key] = value.contiguous()
+    return unpacked
+
+
+def forward_loss(model: nn.Module, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Runs the model over one unpacked batch and returns every loss term to report.
+
+    What goes into the model and which likelihood it is trained under are both decided by
+    the architecture, see `GPT.model_inputs` and `GPT.compute_loss`. `loss` is always the
+    quantity that gets backpropagated.
+    """
+    arch = model_class(model.config)
+    logits = model(**arch.model_inputs(batch))
+    return arch.compute_loss(logits, batch, model.config)
+
+
+def format_losses(losses: dict[str, float] | None) -> str:
+    """Renders the total, with the components in parentheses when there are any."""
+    if losses is None:
+        return "n/a"
+    components = ", ".join(
+        f"{name.removeprefix('loss_')} {value:.3f}" for name, value in losses.items() if name != "loss"
+    )
+    return f"{losses['loss']:.3f}" + (f" ({components})" if components else "")
+
+
+def perplexity(losses: dict[str, float]) -> float:
+    """Perplexity of the next-event distribution.
+
+    Derived from `loss_ce` alone where it exists. The total also carries `loss_dt`,
+    which is a density over a continuous waiting time rather than a distribution over
+    the vocabulary, so exponentiating the sum would not be a perplexity of anything.
+    """
+    return math.exp(losses.get("loss_ce", losses["loss"]))
 
 
 @torch.no_grad()
 def validate(
     fabric: L.Fabric, model: nn.Module, val_dataloader: DataLoader, max_iters: int, verbose: bool = True
-) -> torch.Tensor:
+) -> dict[str, float]:
     fabric.barrier()
     if verbose:
         fabric.print("Validating ...")
     model.eval()
 
-    losses = []
+    losses = defaultdict(list)
     for k, batch in enumerate(val_dataloader):
         if k >= max_iters:
             break
-        input_ids = batch[:, 0 : model.max_seq_length].contiguous().long()
-        targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long()
-        logits = model(input_ids)
-        loss = chunked_cross_entropy(logits, targets)
-        losses.append(loss)
+        for name, value in forward_loss(model, _unpack_batch(batch, model.max_seq_length)).items():
+            losses[name].append(value)
 
-    val_loss = torch.stack(losses).mean()
+    val_losses = {name: torch.stack(values).mean().item() for name, values in losses.items()}
     model.train()
     fabric.barrier()
-    return val_loss
+    return val_losses
 
 
 def get_dataloaders(

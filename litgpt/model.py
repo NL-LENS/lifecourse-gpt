@@ -17,6 +17,7 @@ from typing_extensions import Self
 
 from litgpt.config import Config
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
+from litgpt.utils import chunked_cross_entropy
 
 
 class GPT(nn.Module):
@@ -88,6 +89,8 @@ class GPT(nn.Module):
         input_pos: torch.Tensor | None = None,
         input_pos_maxp1: int | None = None,
         lm_head_chunk_size: int = 0,
+        attn_mask: torch.Tensor | None = None,
+        **embed_kwargs: torch.Tensor,
     ) -> torch.Tensor | list[torch.Tensor]:
         """
         If `input_pos` is provided, the KV cache uses K and V vectors for
@@ -109,6 +112,16 @@ class GPT(nn.Module):
             input_pos_maxp1: Optional. See above.
             lm_head_chunk_size: Optional. If `lm_head_chunk_size > 0`, the final
                 `lm_head` computation is done in chunks of this size.
+            attn_mask: Optional. Attention mask shared by all layers, shape
+                `(B, 1, T, T)` or broadcastable to it. `True` (or `0.0` for an
+                additive float mask) where attention is allowed. Passing a mask
+                switches off the built-in causal masking, so the mask must
+                encode the causal structure itself; see for example
+                `litgpt.life_events.delphi.model.build_tie_mask`. Only supported
+                without `input_pos`, i.e. outside of KV cache use.
+            embed_kwargs: Optional. Extra per-token inputs forwarded to `embed`,
+                for subclasses whose input embedding needs more than token ids
+                (e.g. the age of each event). The base class accepts none.
 
         Returns:
             Logit outputs, shape `(B, T, config.padded_vocab_size)`. If
@@ -120,6 +133,15 @@ class GPT(nn.Module):
         T = idx.size(1)
         if self.max_seq_length < T:
             raise ValueError(f"Cannot forward sequence of length {T}, max seq length is only {self.max_seq_length}.")
+
+        if attn_mask is not None:
+            if input_pos is not None:
+                raise ValueError("`attn_mask` is not supported together with `input_pos` (KV cache)")
+            if attn_mask.dtype == torch.bool and self.config.attention_logit_softcapping is not None:
+                raise ValueError(
+                    "With `attention_logit_softcapping`, masks are added to the attention scores, so "
+                    "`attn_mask` must be an additive float mask rather than a boolean one."
+                )
 
         if input_pos is not None:  # use the kv cache
             if input_pos.dim() > 2:
@@ -149,12 +171,10 @@ class GPT(nn.Module):
             cos = self.cos[:T].unsqueeze(0)
             sin = self.sin[:T].unsqueeze(0)
             # `cos`, `sin` have shape (1, T, config.rope_n_elem)
-            mask = None  # defaults to causal mask
+            mask = attn_mask  # `None` defaults to causal mask
             input_pos_maxp1 = None
 
-        x = self.transformer.wte(idx)  # token embeddings of shape (B, T, n_embd)
-        if self.config.scale_embeddings:
-            x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
+        x = self.embed(idx, **embed_kwargs)  # (B, T, n_embd)
 
         for block_idx, block in enumerate(self.transformer.h):
             if self.config.rope_indices is not None:
@@ -179,6 +199,39 @@ class GPT(nn.Module):
             return [clamp_head(self.lm_head(x_i)) for x_i in x.split(lm_head_chunk_size, dim=1)]
         else:
             return clamp_head(self.lm_head(x))  # (B, T, padded_vocab_size)
+
+    def embed(self, idx: torch.Tensor) -> torch.Tensor:
+        """Input embeddings of shape `(B, T, n_embd)`.
+
+        The hook for architectures that condition on more than token ids: a subclass
+        overrides this with extra keyword arguments, which `forward` passes through.
+        """
+        x = self.transformer.wte(idx)  # token embeddings of shape (B, T, n_embd)
+        if self.config.scale_embeddings:
+            x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
+        return x
+
+    # The three methods below are the contract `litgpt.pretrain` trains against. They are
+    # static so that the training loop can call them on the class `model_class(config)`
+    # resolves, regardless of whatever wrapper (Fabric, `torch.compile`) the instance is in.
+
+    @staticmethod
+    def model_inputs(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Keyword arguments for `forward`, taken from an unpacked training batch."""
+        return {"idx": batch["input_ids"]}
+
+    @staticmethod
+    def compute_loss(
+        logits: torch.Tensor | list[torch.Tensor], batch: dict[str, torch.Tensor], config: Config
+    ) -> dict[str, torch.Tensor]:
+        """Every loss term to report. `loss` is the one that gets backpropagated."""
+        return {"loss": chunked_cross_entropy(logits, batch["targets"])}
+
+    @staticmethod
+    def example_batch(batch_size: int, seq_length: int, config: Config) -> dict[str, torch.Tensor]:
+        """A batch of the right shapes and dtypes, used to measure FLOPs on the meta device."""
+        x = torch.randint(0, 1, (batch_size, seq_length))
+        return {"input_ids": x, "targets": x}
 
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
@@ -304,6 +357,35 @@ class GPT(nn.Module):
         self.mask_cache = None
         for block in self.transformer.h:
             block.attn.kv_cache = None
+
+
+_MODEL_CLASSES = {
+    "GPT": "litgpt.model.GPT",
+    "Delphi": "litgpt.life_events.delphi.model.Delphi",
+}
+"""Short names accepted by `Config.model_class_name`. Anything else is read as a dotted
+import path, so an architecture outside this package needs no registration."""
+
+
+def model_class(config: Config) -> type[GPT]:
+    """The `GPT` subclass `config.model_class_name` names.
+
+    Imported lazily: the subclasses import this module, so resolving them eagerly here
+    would be circular.
+    """
+    import importlib
+
+    path = _MODEL_CLASSES.get(config.model_class_name, config.model_class_name)
+    module_name, _, class_name = path.rpartition(".")
+    if not module_name:
+        raise ValueError(
+            f"Unknown model_class_name {config.model_class_name!r}, expected one of "
+            f"{list(_MODEL_CLASSES)} or a dotted import path"
+        )
+    cls = getattr(importlib.import_module(module_name), class_name)
+    if not (isinstance(cls, type) and issubclass(cls, GPT)):
+        raise TypeError(f"{path} is not a subclass of `litgpt.model.GPT`")
+    return cls
 
 
 class Block(nn.Module):

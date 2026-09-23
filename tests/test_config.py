@@ -43,6 +43,8 @@ def test_nonexisting_name():
 
 @pytest.mark.parametrize("config", config_module.configs, ids=[c["name"] for c in config_module.configs])
 def test_short_and_hf_names_are_equal_unless_on_purpose(config):
+    if "hf_config" not in config:
+        pytest.skip("no counterpart on the HF Hub, so there is no second name to compare")
     # by short-hand name
     config0 = Config.from_name(config["name"])
     # or by huggingface hub repo name

@@ -15,12 +15,14 @@ from litgpt.data.openwebtext import OpenWebText
 from litgpt.data.text_files import TextFiles
 from litgpt.data.tinyllama import TinyLlama
 from litgpt.data.tinystories import TinyStories
+from litgpt.life_events.delphi.data import DelphiLifeEvents
 
 __all__ = [
     "Alpaca",
     "Alpaca2k",
     "AlpacaGPT4",
     "Deita",
+    "DelphiLifeEvents",
     "FLAN",
     "JSON",
     "LIMA",

@@ -26,6 +26,9 @@ def find_multiple(n: int, k: int) -> int:
 class Config:
     name: str = ""
     hf_config: dict = field(default_factory=dict)
+    # The `litgpt.model.GPT` subclass to build, see `litgpt.model.model_class`: a short
+    # name such as "GPT" or "Delphi", or a dotted import path.
+    model_class_name: str = "GPT"
     # General size parameters
     block_size: int = 4096
     n_layer: int = 16
@@ -114,6 +117,20 @@ class Config:
     # `rope_base` is used, for 1 `rope_local_base_freq` is used. If
     # `len(rope_indices) > n_layer`, we only use the initial part.
     rope_indices: list[int] | None = None
+    # Life-course (Delphi) models. Only read by `litgpt.life_events.delphi.model.Delphi`.
+    # Age encoding: base of the geometric sequence of sinusoidal frequencies used
+    # to encode a token's age. Analogous to `rope_base`, but the encoded quantity is
+    # a continuous age in years rather than an integer position.
+    age_base: int = 10000
+    # Time-to-event loss: floor on the expected waiting time, in the same unit as `age`
+    # (days). Caps the implied event rate at `1 / t_min`, so that tied or same-day events
+    # cannot drive it to infinity. `0.0` disables it. See
+    # `litgpt.life_events.delphi.loss.chunked_cross_entropy_exp_waiting_time`.
+    t_min: float = 0.0
+    # Dropout applied to the token embeddings only, before the age encoding is added.
+    # Distinct from the residual dropout: it drops whole event embeddings while leaving
+    # the age signal intact, so the model cannot lean on any single event.
+    token_dropout: float = 0.0
 
     def __post_init__(self):
         if not self.name:
@@ -185,13 +202,14 @@ class Config:
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self | None:
         if name not in name_to_config:
-            # search through all `config['hf_config']['name']`
+            # search through all `config['hf_config']['name']`. `hf_config` is optional,
+            # see the field default: a model with no counterpart on the Hub, such as a
+            # life-course model, is reachable by its short name only.
             try:
                 conf_dict = next(
                     config
                     for config in configs
-                    if name == config["hf_config"]["name"]
-                    or config["hf_config"]["org"] + "/" + config["hf_config"]["name"] == name
+                    if (hf := config.get("hf_config")) and (name == hf["name"] or hf["org"] + "/" + hf["name"] == name)
                 )
             except StopIteration:
                 raise ValueError(f"{name!r} is not a supported config name")
@@ -3190,5 +3208,43 @@ r1_distill_llama = [
 ]
 
 configs.extend(r1_distill_llama)
+
+
+######################################
+# Life-course event models (Delphi)
+######################################
+# Adapted from https://github.com/gerstung-lab/Delphi/blob/main/model.py under the MIT license
+#
+# `rotary_percentage=0.0` is important here because Delphi carries no positional
+# embedding at all and lets the age encoding be the only ordering signal. Events arrive
+# at irregular times, so a token's index in the sequence ("the third event") says much
+# less than its age ("at 31.4 years"), and encoding both makes the model fit the index.
+# Anything built on `AgeEncoding` should disable RoPE for the same reason. The model
+# itself lives in `litgpt.life_events.delphi`.
+#
+# `vocab_size` and `padded_vocab_size` are placeholders: set both to the real vocabulary
+# size, since unused entries still contribute `exp(logit)` to the total event rate in
+# `chunked_cross_entropy_exp_waiting_time`.
+life_events = [
+    dict(
+        name="delphi-2m",
+        model_class_name="Delphi",
+        block_size=48,
+        vocab_size=1270,
+        padded_vocab_size=1270,
+        n_layer=12,
+        n_head=12,
+        n_embd=120,
+        rotary_percentage=0.0,
+        parallel_residual=False,
+        bias=True,
+        norm_class_name="LayerNorm",
+        mlp_class_name="GptNeoxMLP",
+        intermediate_size=480,
+        t_min=0.0,
+        token_dropout=0.0,
+    ),
+]
+configs.extend(life_events)
 
 name_to_config = {config["name"]: config for config in configs}
