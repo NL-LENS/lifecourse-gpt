@@ -22,7 +22,6 @@ from litgpt.data.base import DataModule
 from litgpt.life_events.data.source import BIRTH_ORIGIN, NoteField, build_event_cache, needs_birthdate, summarize
 from litgpt.life_events.data.store import SequenceStore
 from litgpt.life_events.data.vocab import EventVocab
-from litgpt.tokenizer import Tokenizer
 
 __all__ = ["LifeEventsDataModule"]
 
@@ -169,11 +168,7 @@ class LifeEventsDataModule(DataModule):
 
     # ---- DataModule ----------------------------------------------------------------
 
-    def connect(
-        self, tokenizer: Tokenizer | None = None, batch_size: int = 1, max_seq_length: int | None = None
-    ) -> None:
-        # `tokenizer` is part of the `DataModule` contract but unused: the event
-        # vocabulary is derived from the data itself, see `EventVocab`.
+    def connect(self, batch_size: int = 1, max_seq_length: int | None = None) -> None:
         self.batch_size = batch_size
         self.max_seq_length = -1 if max_seq_length is None else max_seq_length
 

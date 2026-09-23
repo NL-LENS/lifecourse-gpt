@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from typing_extensions import Self
 
 from litgpt.config import Config
-from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import chunked_cross_entropy
 
 
@@ -1405,3 +1404,22 @@ class RMSNorm(torch.nn.Module):
 
     def reset_parameters(self) -> None:
         torch.nn.init.ones_(self.weight)
+
+
+def qkv_reassemble(param: torch.Tensor, config: Config) -> torch.Tensor:
+    """Reassemble from a normal to an interleaved placement in a QKV matrix.
+    [Q, K, V, Q, K, V, ...] --> [Q, Q, ..., K, K, ..., V, V, ...]
+    """
+    q_per_kv = config.n_head // config.n_query_groups
+    qs = []
+    ks = []
+    vs = []
+    for chunk in torch.chunk(param, config.n_query_groups):
+        split = torch.split(chunk, [config.head_size * q_per_kv, config.head_size, config.head_size])
+        qs.append(split[0])
+        ks.append(split[1])
+        vs.append(split[2])
+    q = torch.cat(qs)
+    k = torch.cat(ks)
+    v = torch.cat(vs)
+    return torch.cat((q, k, v))

@@ -98,9 +98,6 @@ optimizer:
 devices: auto
 num_nodes: 1
 
-# The event vocabulary comes from the data itself, so there is no tokenizer to point at.
-tokenizer_dir:
-
 # "csv" keeps this runnable without tensorboard installed.
 logger_name: csv
 

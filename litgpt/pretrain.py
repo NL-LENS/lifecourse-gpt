@@ -19,11 +19,10 @@ from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flo
 from torch.utils.data import DataLoader
 from torchmetrics.aggregation import RunningMean
 
-from litgpt import Tokenizer
 from litgpt.args import EvalArgs, LogArgs, TrainArgs
 from litgpt.config import name_to_config
 from litgpt.constants import _TORCH_EQUAL_2_7, _TORCH_EQUAL_2_8
-from litgpt.data import DataModule, TinyLlama
+from litgpt.data import DataModule, DelphiLifeEvents
 from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP, model_class
 from litgpt.parser_config import save_hyperparameters
 from litgpt.types import LoggerChoice
@@ -32,7 +31,6 @@ from litgpt.utils import (
     capture_hparams,
     check_nvlink_connectivity,
     choose_logger,
-    copy_config_files,
     extend_checkpoint_dir,
     find_resume_path,
     get_default_supported_precision,
@@ -69,7 +67,6 @@ def setup(
     optimizer: str | dict = "AdamW",
     devices: int | str = "auto",
     num_nodes: int = 1,
-    tokenizer_dir: Path | None = None,
     logger_name: LoggerChoice = "tensorboard",
     seed: int = 42,
     prepare_data_only: bool = False,
@@ -88,15 +85,13 @@ def setup(
         resume: Path to a checkpoint directory to resume from in case training was interrupted, or ``True`` to resume
             from the latest checkpoint in ``out_dir``. An error will be raised if no checkpoint is found. Passing
             ``'auto'`` will resume from the latest checkpoint but not error if no checkpoint exists.
-        data: Data-related arguments. If not provided, the default is ``litgpt.data.TinyLlama``.
+        data: Data-related arguments. If not provided, the default is ``litgpt.data.DelphiLifeEvents``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
         eval: Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details.
         optimizer: An optimizer name (such as "AdamW") or config.
 
         devices: How many devices/GPUs to use. Uses all GPUs by default.
         num_nodes: How many nodes the code is being run on.
-        tokenizer_dir: Optional path to the tokenizer dir that was used for preprocessing the dataset. Only some data
-            module require this.
         logger_name: The name of the logger to send metrics to.
         seed: The random seed to use for reproducibility.
         prepare_data_only: Preprocess the dataset and exit, training nothing. Useful when
@@ -113,9 +108,6 @@ def setup(
     if initial_checkpoint_dir is not None:
         initial_checkpoint_dir = extend_checkpoint_dir(initial_checkpoint_dir)
 
-    if tokenizer_dir is not None:
-        tokenizer_dir = extend_checkpoint_dir(tokenizer_dir)
-
     if model_config is None:
         # Support both model_name options: meta-llama/Meta-Llama-3-8B & Meta-Llama-3-8B
         try:
@@ -127,7 +119,7 @@ def setup(
             quit()
 
     hparams = capture_hparams()
-    data = TinyLlama() if data is None else data
+    data = DelphiLifeEvents() if data is None else data
 
     config = Config.from_name(model_name) if model_config is None else model_config
     # A data module whose batches only one architecture can read says so. Checked up
@@ -144,13 +136,10 @@ def setup(
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
     out_dir = init_out_dir(out_dir)
-    # in case the dataset requires the Tokenizer
-    tokenizer = Tokenizer(tokenizer_dir) if tokenizer_dir is not None else None
-
     if prepare_data_only:
         # Before the logger and Fabric: this writes a dataset, and has no business
         # creating run directories or claiming devices.
-        data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=config.block_size)
+        data.connect(batch_size=train.micro_batch_size, max_seq_length=config.block_size)
         data.prepare_data()
         return
 
@@ -189,8 +178,6 @@ def setup(
         config=config,
         data=data,
         out_dir=out_dir,
-        tokenizer_dir=tokenizer_dir,
-        tokenizer=tokenizer,
         train=train,
         eval=eval,
         optimizer=optimizer,
@@ -206,8 +193,6 @@ def main(
     config: Config,
     data: DataModule,
     out_dir: Path,
-    tokenizer_dir: Path | None,
-    tokenizer: Tokenizer | None,
     train: TrainArgs,
     eval: EvalArgs,
     optimizer: str | dict,
@@ -241,7 +226,7 @@ def main(
     optimizer = instantiate_torch_optimizer(optimizer, model.parameters(), **extra_kwargs)
     optimizer = fabric.setup_optimizers(optimizer)
 
-    train_dataloader, val_dataloader = get_dataloaders(fabric, data, tokenizer, train, model.max_seq_length)
+    train_dataloader, val_dataloader = get_dataloaders(fabric, data, train, model.max_seq_length)
     train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
     if initial_checkpoint_dir:
@@ -282,13 +267,12 @@ def main(
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         out_dir=out_dir,
-        tokenizer_dir=tokenizer_dir,
         train=train,
         eval=eval,
     )
 
     # Save final checkpoint
-    save_checkpoint(fabric, state, tokenizer_dir, out_dir / "final" / "lit_model.pth")
+    save_checkpoint(fabric, state, out_dir / "final" / "lit_model.pth")
 
     total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
 
@@ -315,7 +299,6 @@ def fit(
     train_dataloader: DataLoader,
     val_dataloader: DataLoader,
     out_dir: Path,
-    tokenizer_dir: Path | None,
     train: TrainArgs,
     eval: EvalArgs,
     num_nodes: int = 1,
@@ -441,7 +424,7 @@ def fit(
             fabric.barrier()
 
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
-            save_checkpoint(fabric, state, tokenizer_dir, out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth")
+            save_checkpoint(fabric, state, out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth")
 
     # Final validation
     if eval.final_validation:
@@ -532,9 +515,9 @@ def validate(
 
 
 def get_dataloaders(
-    fabric: L.Fabric, data: DataModule, tokenizer: Tokenizer, train: TrainArgs, block_size: int
+    fabric: L.Fabric, data: DataModule, train: TrainArgs, block_size: int
 ) -> tuple[DataLoader, DataLoader]:
-    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=block_size)
+    data.connect(batch_size=train.micro_batch_size, max_seq_length=block_size)
     with fabric.rank_zero_first():
         data.prepare_data()
     data.setup()
@@ -580,15 +563,13 @@ def initialize_weights(fabric: L.Fabric, model: GPT, n_layer: int, n_embd: int) 
         reset_parameters(model)
 
 
-def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file):
+def save_checkpoint(fabric, state, checkpoint_file):
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
     fabric.save(checkpoint_file, state)
     if fabric.global_rank == 0:
         save_hyperparameters(setup, checkpoint_file.parent)
-        if tokenizer_dir is not None:
-            copy_config_files(tokenizer_dir, checkpoint_file.parent)
         save_config(model.config, checkpoint_file.parent)
 
 
