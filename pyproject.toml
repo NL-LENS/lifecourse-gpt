@@ -35,8 +35,6 @@ dependencies = [
 optional-dependencies.extra = [
   # litgpt.life_events.data:
   "duckdb>=1.0",
-  # litgpt logging:
-  "litlogger>=0.1.7",
   # litgpt.life_events.data, litgpt.life_events.dummy_data:
   "pyarrow>=15.0.2",
   # litgpt.pretrain logger_name="tensorboard":
