@@ -3,10 +3,9 @@
 # Partially generated and refined with Claude Code (Opus 5).
 """Life-course event trajectory sampling for Delphi.
 
-The text samplers in `litgpt.generate` draw a token from a softmax and leave time
-implicit, because the next token simply follows the last one. Here the model's logits
-are log event rates, so a step has to produce *both* the next event and the age at
-which it happens. See `loss.chunked_cross_entropy_exp_waiting_time` for the
+A text sampler draws a token from a softmax and leaves time implicit, because the next
+token simply follows the last one. Here the model's logits are log event rates, so a
+step has to produce *both* the next event and the age at which it happens. See `loss.chunked_cross_entropy_exp_waiting_time` for the
 likelihood these samples come from.
 """
 
@@ -96,8 +95,8 @@ def generate_trajectories(
     was_training = model.training
     model.eval()
 
-    # `inference_mode` rather than `no_grad`, matching the rest of `litgpt.generate`: it
-    # also skips version-counter and view tracking. The catch is that tensors born inside
+    # `inference_mode` rather than `no_grad`: it also skips version-counter and view
+    # tracking. The catch is that tensors born inside
     # it are inference tensors, which cannot later be saved for backward or mutated in
     # place -- both of which a sampled cohort is likely to face, being data to analyse
     # rather than text to print. Hence a context manager and a clone on the way out,
