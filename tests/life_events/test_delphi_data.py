@@ -92,7 +92,6 @@ def test_no_event_regular_grid_and_truncation(tmp_path, dataset):
 
 
 def test_no_eos_token_is_emitted(tmp_path, dataset):
-    """Deliberate deviation from LIFE_EVENT_DATA.md: the censored tail is dropped."""
     data = prepared(tmp_path, dataset, no_event_mode="none", max_seq_length=-1)
     sample = data.train_dataset[0]
     tokens = data._store.sequence(int(data.train_dataset.indices[0]))["tokens"]

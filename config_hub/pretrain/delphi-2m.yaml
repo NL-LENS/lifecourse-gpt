@@ -3,7 +3,7 @@
 #   python -m litgpt.life_events.dummy_data --out_dir data/dummy_life_events
 # Run it with
 #   litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml
-# See LIFE_EVENT_DATA.md for the data format and for training on your own datasets.
+# See README.md for the data format and for training on your own datasets.
 
 # Delphi's architecture, from `litgpt.config`. It is spelled out under ``model_config``
 # rather than named here because ``model_config`` replaces a named config wholesale, and
