@@ -25,13 +25,13 @@ Time-invariate person attributes are stored in a separate dataset (also in Parqu
 First, to create dummy silver layer event datasets in the expected format, for trying out the pipeline end-to-end:
 
 ```bash
-python -m litgpt.life_events.dummy_data --out_dir data/dummy_life_events
+litgpt dummy_data --out_dir data/dummy_life_events
 ```
 
 It writes two event datasets with deliberately different `NOTES` schemas
 (`work_education.parquet`, `civil_registry.parquet`) and a `persons.parquet` with
 `BIRTHDATE`. By default, they contain 2000 invented people, ~27k events, 13 event types. You can pass `--n_persons` to create
-larger dataset.s It is made up, so nothing trained on it means anything.
+larger datasets. It is made up, so nothing trained on it means anything.
 
 Then pretrain Delphi on it:
 

@@ -1,6 +1,6 @@
 # Partially generated and refined with Claude Code (Opus 5).
 # Pretrains a Delphi life-course model on the synthetic silver layer written by
-#   python -m litgpt.life_events.dummy_data --out_dir data/dummy_life_events
+#   litgpt dummy_data --out_dir data/dummy_life_events
 # Run it with
 #   litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml
 # See README.md for the data format and for training on your own datasets.
