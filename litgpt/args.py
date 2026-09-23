@@ -33,6 +33,10 @@ class TrainArgs:
     """Limits the length of samples"""
     tie_embeddings: bool | None = None
     """Whether to tie the embedding weights with the language modeling head weights"""
+    compile: bool | None = None
+    """Whether to wrap the model in `torch.compile`. `None` compiles wherever the platform
+    supports it and falls back to eager with a message where it does not, which is what a
+    Windows machine without the MSVC build tools does."""
 
     # Optimization args
     max_norm: float | None = None

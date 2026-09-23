@@ -6,7 +6,9 @@ import inspect
 import math
 import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Iterable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -142,6 +144,22 @@ def get_default_supported_precision(training: bool) -> str:
         else:
             return "16-mixed" if training else "16-true"
     return "bf16-mixed" if training else "bf16-true"
+
+
+def compile_unsupported_reason() -> str | None:
+    """Why `torch.compile` would fail on this machine, or `None` when it should work.
+
+    Covers only what is knowable before the first compile: the interpreter, which torch
+    checks itself, and the C++ compiler TorchInductor shells out to for its CPU backend.
+    That compiler is MSVC on Windows, and `cl.exe` is on PATH only inside a developer
+    command prompt or once the Build Tools are installed, which is what makes an
+    unconditional `torch.compile` fail on an otherwise fine Windows machine.
+    """
+    if not torch._dynamo.is_inductor_supported():
+        return f"TorchInductor does not support Python {sys.version_info.major}.{sys.version_info.minor}"
+    if sys.platform == "win32" and shutil.which("cl") is None:
+        return "TorchInductor compiles its CPU kernels with MSVC and `cl.exe` is not on PATH"
+    return None
 
 
 class CycleIterator:

@@ -31,6 +31,7 @@ from litgpt.utils import (
     capture_hparams,
     check_nvlink_connectivity,
     choose_logger,
+    compile_unsupported_reason,
     extend_checkpoint_dir,
     find_resume_path,
     get_default_supported_precision,
@@ -219,7 +220,16 @@ def main(
     fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
     fabric.print(f"Total parameters: {num_parameters(model):,}")
 
-    model = torch.compile(model)
+    compile_model = train.compile
+    if compile_model is None:
+        # Left to us, compile only where it can work: an unconditional `torch.compile`
+        # is what turns an otherwise runnable machine into a failed run.
+        reason = compile_unsupported_reason()
+        compile_model = reason is None
+        if not compile_model:
+            fabric.print(f"Running eager: {reason}. Pass `--train.compile true` to compile anyway.")
+    if compile_model:
+        model = torch.compile(model)
     model = fabric.setup(model)
 
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
