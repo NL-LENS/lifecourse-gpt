@@ -15,6 +15,7 @@ data
 datasets
 !litgpt/data
 !tests/data
+!litgpt/life_events/data
 checkpoints
 out
 wandb

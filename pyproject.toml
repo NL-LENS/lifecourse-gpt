@@ -28,6 +28,7 @@ dependencies = [
   "huggingface-hub>=0.30,<1.4",
   "jsonargparse[signatures]>=4.37,<=4.41; python_version>='3.10'", # required to work with Python >=3.10
   "lightning>=2.6.1",
+  "numpy",
   "psutil==7.2.2",
   "safetensors>=0.4.3",
   # tokenization in most models:
@@ -47,6 +48,8 @@ optional-dependencies.extra = [
   "bitsandbytes>=0.42,<0.43; sys_platform=='darwin'",
   # quantization:
   "bitsandbytes>=0.45.2,<0.50; sys_platform=='linux' or sys_platform=='win32'",
+  # litgpt.data.life_events:
+  "duckdb>=1.0",
   # litgpt.evaluate:
   "datasets>=2.18,<4",
   # download:
@@ -76,6 +79,8 @@ optional-dependencies.extra = [
   "zstandard>=0.22",
 ]
 optional-dependencies.test = [
+  # litgpt.data.life_events:
+  "duckdb>=1.0",
   "einops>=0.7",
   "protobuf>=4.23.4",
   "pytest>=8.1.1",
