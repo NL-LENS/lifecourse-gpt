@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from litgpt.config import Config
-from litgpt.life_events.delphi.data import PAD_AGE
+from litgpt.life_events.delphi.data import NO_EVENT_ID, PAD_AGE, PAD_ID
 from litgpt.life_events.delphi.generate import generate_trajectories
 from litgpt.life_events.delphi.loss import chunked_cross_entropy_exp_waiting_time
 from litgpt.life_events.delphi.mask import build_tie_mask, last_visible_index
@@ -303,3 +303,31 @@ def test_generate_rejects_prompts_that_are_not_right_padded(idx):
     idx = torch.tensor(idx)
     with pytest.raises(ValueError, match="right-padded|at least one"):
         generate_trajectories(model, idx, torch.zeros_like(idx), max_new_tokens=2)
+
+
+def _model_preferring(token: int) -> Delphi:
+    """A model whose logits ignore the input and put nearly all mass on `token`."""
+    model = Delphi(_config(block_size=16, lm_head_bias=True))
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+        model.lm_head.bias.fill_(-10.0)
+        model.lm_head.bias[token] = 10.0
+    return model
+
+
+def test_no_repeat_lets_no_event_tokens_recur():
+    model = _model_preferring(NO_EVENT_ID)
+    idx, age = torch.tensor([[2, NO_EVENT_ID, 3]]), torch.tensor([[0, 100, 200]])
+    new_idx, _ = generate_trajectories(model, idx, age, max_new_tokens=4, max_age=float("inf"), no_repeat=True)
+    assert (new_idx[0, 3:] == NO_EVENT_ID).all()
+
+
+def test_no_repeat_blocks_everything_not_repeatable():
+    model = _model_preferring(NO_EVENT_ID)
+    idx, age = torch.tensor([[2, NO_EVENT_ID, 3]]), torch.tensor([[0, 100, 200]])
+    new_idx, _ = generate_trajectories(
+        model, idx, age, max_new_tokens=4, max_age=float("inf"), no_repeat=True, repeatable_tokens=()
+    )
+    # Only events 4 and 5 are left to sample, once each; then nothing admissible remains.
+    assert sorted(new_idx[0, 3:5].tolist()) == [4, 5]
+    assert (new_idx[0, 5:] == PAD_ID).all()

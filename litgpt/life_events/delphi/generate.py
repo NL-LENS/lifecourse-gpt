@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import torch
 
-from litgpt.life_events.delphi.data import PAD_AGE, PAD_ID
+from litgpt.life_events.delphi.data import NO_EVENT_ID, PAD_AGE, PAD_ID
 from litgpt.life_events.delphi.model import Delphi
 
 __all__ = ["generate_trajectories"]
@@ -30,6 +30,7 @@ def generate_trajectories(
     termination_tokens: Sequence[int] | None = None,
     ignore_tokens: Sequence[int] = (PAD_ID,),
     no_repeat: bool = False,
+    repeatable_tokens: Sequence[int] = (NO_EVENT_ID,),
     t_min: float | None = None,
     max_wait: float = 80 * 365.25,
     pad_id: int = PAD_ID,
@@ -80,6 +81,11 @@ def generate_trajectories(
         no_repeat: Forbid sampling an event already present in the trajectory. Right for
             a vocabulary of one-off diagnoses, wrong for recurring events such as
             starting a job, so it is off by default.
+        repeatable_tokens: Event ids exempt from `no_repeat`. The default exempts the
+            no-event token, as Delphi does: it marks the passing of time and recurs every
+            few years in training, so blocking it after its first occurrence would force
+            quiet stretches to be filled with real events. Add recurring events here to
+            use `no_repeat` with a mixed vocabulary.
         t_min: Floor on the expected waiting time. `None` takes `model.config.t_min`,
             which keeps sampling consistent with the likelihood the model was fitted to.
         max_wait: Clamp on a single sampled waiting time, guarding against a
@@ -108,6 +114,7 @@ def generate_trajectories(
     t_min = model.config.t_min if t_min is None else t_min
     terminators = torch.tensor(list(termination_tokens or ()), dtype=idx.dtype, device=idx.device)
     ignored = torch.tensor(list(ignore_tokens or ()), dtype=torch.int64, device=idx.device)
+    repeatable = torch.tensor(list(repeatable_tokens or ()), dtype=torch.int64, device=idx.device)
 
     was_training = model.training
     model.eval()
@@ -130,6 +137,7 @@ def generate_trajectories(
                 terminators,
                 ignored,
                 no_repeat,
+                repeatable,
                 t_min,
                 max_wait,
                 pad_id,
@@ -154,6 +162,7 @@ def _sample(
     terminators: torch.Tensor,
     ignored: torch.Tensor,
     no_repeat: bool,
+    repeatable: torch.Tensor,
     t_min: float,
     max_wait: float,
     pad_id: int,
@@ -213,7 +222,10 @@ def _sample(
             logits.index_fill_(-1, ignored, -torch.inf)
         if no_repeat:
             # Also hits the padding of each row, which only ever holds `pad_id`.
-            logits.scatter_(-1, out_idx, -torch.inf)
+            seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, out_idx, True)
+            if repeatable.numel():
+                seen.index_fill_(-1, repeatable, False)
+            logits.masked_fill_(seen, -torch.inf)
 
         # Every admissible event has been used up: nothing left to sample.
         done = done | torch.isinf(logits).all(-1)
