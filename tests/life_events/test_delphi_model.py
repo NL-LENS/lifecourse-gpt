@@ -178,3 +178,43 @@ def test_generate_trajectories():
     # Ages never go backwards, and the padding token is never sampled.
     assert (new_age.diff(dim=1) >= 0).all()
     assert not (new_idx[:, 2:] == 0).any()
+
+
+def test_kv_cache_matches_full_forward():
+    # Ages enter only through the input embedding, so an event's keys and values never
+    # change once appended and the cache must reproduce a full re-run of the sequence.
+    torch.manual_seed(0)
+    model = Delphi(_config(block_size=16)).eval()
+    model.apply(model._init_weights)
+    idx = torch.randint(1, 6, (3, 12))
+    age = torch.randint(0, 30_000, (3, 12)).sort(dim=1).values
+
+    with torch.inference_mode():
+        expected = model(idx, age=age)
+        model.set_kv_cache(batch_size=3, max_seq_length=12)
+        chunks = [model(idx[:, :5], age=age[:, :5], input_pos=torch.arange(5), input_pos_maxp1=5)]
+        for pos in range(5, 12):
+            chunks.append(
+                model(
+                    idx[:, pos : pos + 1],
+                    age=age[:, pos : pos + 1],
+                    input_pos=torch.tensor([pos]),
+                    input_pos_maxp1=pos + 1,
+                )
+            )
+    torch.testing.assert_close(torch.cat(chunks, dim=1), expected)
+
+
+def test_generate_trajectories_leaves_no_kv_cache_behind():
+    model = Delphi(_config(block_size=16)).train()
+    idx, age = torch.tensor([[2, 3]]), torch.tensor([[0, 100]])
+    generate_trajectories(model, idx, age, max_new_tokens=3, max_age=float("inf"))
+    assert model.mask_cache is None
+    assert all(block.attn.kv_cache is None for block in model.transformer.h)
+    assert model.training
+
+    # Also when sampling fails partway, here by running past the model's context.
+    with pytest.raises(ValueError, match="max seq length"):
+        generate_trajectories(model, idx, age, max_new_tokens=20, max_age=float("inf"))
+    assert model.mask_cache is None
+    assert model.training

@@ -51,10 +51,12 @@ def generate_trajectories(
     to `t_min`, which caps the rate at `1 / t_min` and which the per-type form cannot
     express (the cap applies to the total rate, not to any individual one).
 
-    No KV cache: the full sequence is re-run each step. The cache is keyed by position
-    and would have to be re-derived from ages anyway, and `GPT.forward` refuses a custom
-    `attn_mask` alongside `input_pos`. Tie masking is deliberately absent here because it
-    hides a token's own target, and at sampling time there is no target to leak.
+    Past events are served from a KV cache, so each step only runs the newly sampled
+    event through the model. That is exact: ages enter only through the input embedding,
+    so the keys and values of an event never change once it has been appended, and the
+    plain causal mask of the cache is the right one because tie masking is deliberately
+    absent here. The tie mask hides a token's own target, and at sampling time there is
+    no target to leak. Any cache already set on `model` is cleared on the way out.
 
     Args:
         model: A model whose logits are log event rates, in events per unit of `age`.
@@ -101,24 +103,26 @@ def generate_trajectories(
     # place -- both of which a sampled cohort is likely to face, being data to analyse
     # rather than text to print. Hence a context manager and a clone on the way out,
     # instead of a decorator over the whole function.
-    with torch.inference_mode():
-        idx, age = _sample(
-            model,
-            idx,
-            age,
-            max_new_tokens,
-            max_age,
-            terminators,
-            ignored,
-            no_repeat,
-            t_min,
-            max_wait,
-            pad_id,
-            generator,
-        )
-
-    if was_training:
-        model.train()
+    try:
+        with torch.inference_mode():
+            idx, age = _sample(
+                model,
+                idx,
+                age,
+                max_new_tokens,
+                max_age,
+                terminators,
+                ignored,
+                no_repeat,
+                t_min,
+                max_wait,
+                pad_id,
+                generator,
+            )
+    finally:
+        model.clear_kv_cache()
+        if was_training:
+            model.train()
     # Cloned outside the context above, which is what clears the inference flag.
     return idx.clone(), age.clone()
 
@@ -145,11 +149,28 @@ def _sample(
     # forwarded so the batch stays rectangular, but its samples are discarded.
     done = torch.isin(idx, terminators).any(-1) | (age[:, -1] > max_age)
 
+    B, T = idx.shape
+    # Capped at the model's context, which the loop below refuses to run past. Checked
+    # there rather than here so that trajectories which terminate early are unaffected
+    # by a generous `max_new_tokens`.
+    cache_length = min(T + max_new_tokens, model.max_seq_length)
+    dtype = next(model.parameters()).dtype
+    model.set_kv_cache(batch_size=B, max_seq_length=cache_length, device=idx.device, dtype=dtype)
+
+    # Positions before `start` are already in the cache. The first step prefills it with
+    # the whole prompt, later steps feed only the event appended in the step before.
+    start = 0
     for _ in range(max_new_tokens):
         if bool(done.all()):
             break
 
-        logits = model(idx, age=age)[:, -1, :].float()
+        end = idx.size(1)
+        if end > model.max_seq_length:
+            raise ValueError(f"Cannot forward sequence of length {end}, max seq length is only {model.max_seq_length}.")
+        input_pos = torch.arange(start, end, device=idx.device)
+        logits = model(idx[:, start:], age=age[:, start:], input_pos=input_pos, input_pos_maxp1=end)
+        logits = logits[:, -1, :].float()
+        start = end
         if ignored.numel():
             logits.index_fill_(-1, ignored, -torch.inf)
         if no_repeat:
