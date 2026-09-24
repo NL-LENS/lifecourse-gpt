@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import torch
 
-from litgpt.life_events.delphi.data import PAD_ID
+from litgpt.life_events.delphi.data import PAD_AGE, PAD_ID
 from litgpt.life_events.delphi.model import Delphi
 
 __all__ = ["generate_trajectories"]
@@ -33,6 +33,7 @@ def generate_trajectories(
     t_min: float | None = None,
     max_wait: float = 80 * 365.25,
     pad_id: int = PAD_ID,
+    pad_age: float = PAD_AGE,
     generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Continues each trajectory by sampling events and the ages at which they occur.
@@ -58,11 +59,18 @@ def generate_trajectories(
     absent here. The tie mask hides a token's own target, and at sampling time there is
     no target to leak. Any cache already set on `model` is cleared on the way out.
 
+    Prompts are right-padded, as `delphi_collate_fn` builds them, and every trajectory
+    continues from its own last real event. Each row writes new events at its own cache
+    position, overwriting its padding one slot at a time, so no attention mask is needed
+    to hide the padding: it always sits after the row's real events, where the causal
+    mask keeps it out of sight until it has been overwritten.
+
     Args:
         model: A model whose logits are log event rates, in events per unit of `age`.
-        idx: Conditioning tokens, shape `(B, T)`. Every row must be non-empty.
+        idx: Conditioning tokens, shape `(B, T)`, right-padded with `pad_id`. Every row
+            needs at least one real token, and padding may only fill its right end.
         age: Age of each conditioning token, shape `(B, T)`, in the unit the model was
-            trained on (days).
+            trained on (days). Values at padded positions are ignored.
         max_new_tokens: Maximum number of events to append per trajectory.
         max_age: Stop a trajectory once its age passes this.
         termination_tokens: Event ids that end a trajectory, typically death. A
@@ -76,19 +84,26 @@ def generate_trajectories(
             which keeps sampling consistent with the likelihood the model was fitted to.
         max_wait: Clamp on a single sampled waiting time, guarding against a
             near-zero rate producing an absurd age.
-        pad_id: Token written at positions after a trajectory has terminated.
+        pad_id: Padding token, both in the prompt and after the end of a trajectory.
+        pad_age: Age written at positions after the end of a trajectory. The default
+            matches the batches of `delphi_collate_fn`.
         generator: Optional RNG for reproducible sampling.
 
     Returns:
-        `(idx, age)`, each shape `(B, T + n)`, with `n <= max_new_tokens`. Positions
-        after a trajectory terminates hold `pad_id`, and their age repeats the age at
-        which it terminated. Both are ordinary tensors, not inference tensors, so
+        `(idx, age)`, each shape `(B, T + max_new_tokens)` however early sampling stops,
+        so that batches from separate calls line up. Rows are right-padded like the
+        batches of `delphi_collate_fn`: positions past the end of a trajectory hold
+        `pad_id` and age `pad_age`. Both are ordinary tensors, not inference tensors, so
         sampled cohorts can be scored under autograd or edited in place afterwards.
     """
     if idx.shape != age.shape:
         raise ValueError(f"idx and age must have equal shape, but have {idx.shape} != {age.shape}")
-    if idx.size(1) == 0:
-        raise ValueError("Need at least one conditioning token to continue from")
+    real = idx != pad_id
+    lengths = real.sum(-1)
+    if idx.size(1) == 0 or bool((lengths == 0).any()):
+        raise ValueError("Need at least one conditioning token in every row to continue from")
+    if not torch.equal(real, torch.arange(idx.size(1), device=idx.device) < lengths[:, None]):
+        raise ValueError(f"Prompts must be right-padded: `pad_id={pad_id}` may only fill the end of a row")
 
     t_min = model.config.t_min if t_min is None else t_min
     terminators = torch.tensor(list(termination_tokens or ()), dtype=idx.dtype, device=idx.device)
@@ -109,6 +124,7 @@ def generate_trajectories(
                 model,
                 idx,
                 age,
+                lengths,
                 max_new_tokens,
                 max_age,
                 terminators,
@@ -117,6 +133,7 @@ def generate_trajectories(
                 t_min,
                 max_wait,
                 pad_id,
+                pad_age,
                 generator,
             )
     finally:
@@ -131,6 +148,7 @@ def _sample(
     model: Delphi,
     idx: torch.Tensor,
     age: torch.Tensor,
+    lengths: torch.Tensor,
     max_new_tokens: int,
     max_age: float,
     terminators: torch.Tensor,
@@ -139,16 +157,13 @@ def _sample(
     t_min: float,
     max_wait: float,
     pad_id: int,
+    pad_age: float,
     generator: torch.Generator | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The sampling loop of `generate_trajectories`.
 
-    Arguments are checked here.
+    Arguments are checked there. `lengths` counts the real tokens in each row of `idx`.
     """
-    # A trajectory is done once it has terminated or run past `max_age`; it keeps being
-    # forwarded so the batch stays rectangular, but its samples are discarded.
-    done = torch.isin(idx, terminators).any(-1) | (age[:, -1] > max_age)
-
     B, T = idx.shape
     # Capped at the model's context, which the loop below refuses to run past. Checked
     # there rather than here so that trajectories which terminate early are unaffected
@@ -157,31 +172,55 @@ def _sample(
     dtype = next(model.parameters()).dtype
     model.set_kv_cache(batch_size=B, max_seq_length=cache_length, device=idx.device, dtype=dtype)
 
-    # Positions before `start` are already in the cache. The first step prefills it with
-    # the whole prompt, later steps feed only the event appended in the step before.
-    start = 0
-    for _ in range(max_new_tokens):
+    # Sampled events are written into the padding of each row, at `pos`, the position
+    # after its last real event. Ages past the end of a row are reset on the way out.
+    out_idx = torch.cat([idx, idx.new_full((B, max_new_tokens), pad_id)], dim=1)
+    out_age = torch.cat([age, age.new_zeros((B, max_new_tokens))], dim=1)
+    rows = torch.arange(B, device=idx.device)
+    pos = lengths.clone()
+    last_age = age[rows, pos - 1]
+
+    # A trajectory is done once it has terminated or run past `max_age`. It stops
+    # advancing, but keeps being forwarded so the batch stays rectangular: its last
+    # event is fed again, which rewrites the same keys and values into the same slot,
+    # and whatever is sampled for it is discarded.
+    done = torch.isin(idx, terminators).any(-1) | (last_age > max_age)
+
+    for step in range(max_new_tokens):
         if bool(done.all()):
             break
 
-        end = idx.size(1)
-        if end > model.max_seq_length:
-            raise ValueError(f"Cannot forward sequence of length {end}, max seq length is only {model.max_seq_length}.")
-        input_pos = torch.arange(start, end, device=idx.device)
-        logits = model(idx[:, start:], age=age[:, start:], input_pos=input_pos, input_pos_maxp1=end)
-        logits = logits[:, -1, :].float()
-        start = end
+        if step == 0:
+            # Prefill with the whole prompt, padding included; it lies ahead of every
+            # real event, so no real query can see it.
+            logits = model(idx, age=age, input_pos=torch.arange(T, device=idx.device), input_pos_maxp1=T)
+            logits = logits[rows, pos - 1]
+        else:
+            input_pos_maxp1 = int(pos.max())
+            if input_pos_maxp1 > model.max_seq_length:
+                raise ValueError(
+                    f"Cannot forward sequence of length {input_pos_maxp1}, max seq length is only {model.max_seq_length}."
+                )
+            input_pos = (pos - 1)[:, None]
+            logits = model(
+                out_idx.gather(1, input_pos),
+                age=out_age.gather(1, input_pos),
+                input_pos=input_pos,
+                input_pos_maxp1=input_pos_maxp1,
+            )[:, -1]
+        logits = logits.float()
         if ignored.numel():
             logits.index_fill_(-1, ignored, -torch.inf)
         if no_repeat:
-            logits.scatter_(-1, idx, -torch.inf)
+            # Also hits the padding of each row, which only ever holds `pad_id`.
+            logits.scatter_(-1, out_idx, -torch.inf)
 
         # Every admissible event has been used up: nothing left to sample.
         done = done | torch.isinf(logits).all(-1)
         # Keep the softmax and the logsumexp well defined for rows we are discarding.
         logits = torch.where(done[:, None], torch.zeros_like(logits), logits)
 
-        next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1, generator=generator)
+        next_token = torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1, generator=generator).squeeze(-1)
 
         log_total_rate = torch.logsumexp(logits, dim=-1)
         log_rate = -torch.log(torch.exp(-log_total_rate) + t_min)
@@ -194,11 +233,15 @@ def _sample(
             # up to a day off every single step, so trajectories would drift steadily
             # too fast over the dozens of events in a lifetime.
             wait = wait.round()
-        next_age = age[:, -1] + wait.to(age.dtype)
+        next_age = last_age + wait.to(age.dtype)
 
-        idx = torch.cat([idx, torch.where(done[:, None], pad_id, next_token)], dim=1)
-        age = torch.cat([age, torch.where(done, age[:, -1], next_age)[:, None]], dim=1)
+        active = ~done
+        out_idx[rows[active], pos[active]] = next_token[active].to(out_idx.dtype)
+        out_age[rows[active], pos[active]] = next_age[active]
+        last_age = torch.where(active, next_age, last_age)
+        pos = pos + active
 
-        done = done | torch.isin(idx[:, -1], terminators) | (age[:, -1] > max_age)
+        done = done | (active & torch.isin(next_token, terminators)) | (last_age > max_age)
 
-    return idx, age
+    past_end = torch.arange(out_idx.size(1), device=idx.device) >= pos[:, None]
+    return out_idx, out_age.masked_fill(past_end, pad_age)

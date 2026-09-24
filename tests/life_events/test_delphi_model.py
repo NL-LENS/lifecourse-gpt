@@ -9,11 +9,12 @@ import pytest
 import torch
 
 from litgpt.config import Config
+from litgpt.life_events.delphi.data import PAD_AGE
 from litgpt.life_events.delphi.generate import generate_trajectories
 from litgpt.life_events.delphi.loss import chunked_cross_entropy_exp_waiting_time
 from litgpt.life_events.delphi.mask import build_tie_mask, last_visible_index
 from litgpt.life_events.delphi.model import Delphi
-from litgpt.model import GPT, model_class
+from litgpt.model import GPT, batched_index_select, model_class
 from litgpt.pretrain import _unpack_batch, forward_loss
 
 
@@ -218,3 +219,87 @@ def test_generate_trajectories_leaves_no_kv_cache_behind():
         generate_trajectories(model, idx, age, max_new_tokens=20, max_age=float("inf"))
     assert model.mask_cache is None
     assert model.training
+
+
+def test_batched_index_select_handles_empty_tensors():
+    # Delphi has no rotary dims, so the RoPE cache it indexes by position is empty.
+    t = torch.empty(16, 0)
+    assert batched_index_select(t, 0, torch.tensor([[3], [5]])).shape == (2, 1, 0)
+    t = torch.arange(32.0).view(16, 2)
+    torch.testing.assert_close(batched_index_select(t, 0, torch.tensor([[3], [5]])), t[torch.tensor([[3], [5]])])
+
+
+def test_generate_continues_each_row_from_its_last_real_event():
+    torch.manual_seed(0)
+    model = Delphi(_config(block_size=16))
+    model.apply(model._init_weights)
+    lengths = [2, 5, 3]
+    idx = torch.tensor([[2, 3, 0, 0, 0], [4, 2, 5, 3, 2], [5, 5, 4, 0, 0]])
+    age = torch.tensor([[10, 400, -1, -1, -1], [0, 50, 90, 300, 800], [5, 6, 700, -1, -1]])
+
+    # Record the logits each step samples from: the prefill covers the whole prompt,
+    # every later forward a single event per row.
+    seen = []
+    hook = model.register_forward_hook(lambda module, args, out: seen.append(out.detach().clone()))
+    n = 4
+    new_idx, new_age = generate_trajectories(model, idx, age, max_new_tokens=n, max_age=float("inf"))
+    assert new_idx.shape == new_age.shape == (3, 5 + n)
+    hook.remove()
+    assert len(seen) == n
+
+    for b, L in enumerate(lengths):
+        assert torch.equal(new_idx[b, :L], idx[b, :L])
+        assert not (new_idx[b, L : L + n] == 0).any()
+        assert (new_idx[b, L + n :] == 0).all()
+        assert (new_age[b, L - 1 : L + n].diff() >= 0).all()
+        assert (new_age[b, L + n :] == PAD_AGE).all()
+        # Each step saw exactly the logits of running this row alone and unpadded.
+        with torch.inference_mode():
+            expected = model(new_idx[b : b + 1, : L + n], age=new_age[b : b + 1, : L + n])[0, L - 1 : L + n - 1]
+        actual = torch.stack([seen[0][b, L - 1]] + [out[b, 0] for out in seen[1:]])
+        torch.testing.assert_close(actual, expected)
+
+
+def test_generate_pads_rows_that_stop_early():
+    model = Delphi(_config(block_size=16))
+    idx = torch.tensor([[2, 3, 0], [4, 5, 2]])
+    # The first row is already past `max_age`, so only the second one advances.
+    age = torch.tensor([[10, 1_000, -1], [0, 50, 90]])
+    new_idx, new_age = generate_trajectories(model, idx, age, max_new_tokens=3, max_age=500)
+    assert new_idx.shape == new_age.shape == (2, 6)
+    assert torch.equal(new_idx[0, :2], idx[0, :2])
+    assert torch.equal(new_age[0, :2], age[0, :2])
+    assert (new_idx[0, 2:] == 0).all()
+    assert (new_age[0, 2:] == PAD_AGE).all()
+
+
+def test_generate_output_has_a_fixed_width():
+    model = Delphi(_config(block_size=16))
+    idx, age = torch.tensor([[2, 3]]), torch.tensor([[0, 100]])
+    # Stops before sampling anything, and still returns the full width.
+    new_idx, new_age = generate_trajectories(model, idx, age, max_new_tokens=5, max_age=50)
+    assert new_idx.shape == new_age.shape == (1, 7)
+    assert (new_idx[:, 2:] == 0).all()
+    assert (new_age[:, 2:] == PAD_AGE).all()
+
+
+def test_generate_writes_a_custom_pad_age():
+    model = Delphi(_config(block_size=16))
+    idx, age = torch.tensor([[2, 3, 0]]), torch.tensor([[0, 100, -1]])
+    _, new_age = generate_trajectories(model, idx, age, max_new_tokens=2, max_age=50, pad_age=-999)
+    assert torch.equal(new_age, torch.tensor([[0, 100, -999, -999, -999]]))
+
+
+@pytest.mark.parametrize(
+    "idx",
+    [
+        pytest.param([[0, 2, 3], [2, 3, 4]], id="left-padded"),
+        pytest.param([[2, 0, 3], [2, 3, 4]], id="padding-in-the-middle"),
+        pytest.param([[0, 0, 0], [2, 3, 4]], id="empty-row"),
+    ],
+)
+def test_generate_rejects_prompts_that_are_not_right_padded(idx):
+    model = Delphi(_config(block_size=16))
+    idx = torch.tensor(idx)
+    with pytest.raises(ValueError, match="right-padded|at least one"):
+        generate_trajectories(model, idx, torch.zeros_like(idx), max_new_tokens=2)
