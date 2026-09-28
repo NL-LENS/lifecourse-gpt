@@ -8,6 +8,7 @@ def parser_commands() -> list[str]:
     return [
         "pretrain",
         "dummy_data",
+        "generate",
     ]
 
 

@@ -5,6 +5,7 @@ import warnings
 import torch
 from jsonargparse import CLI, set_config_read_mode, set_docstring_parse_options
 
+from litgpt.generate import setup as generate_fn
 from litgpt.life_events.dummy_data import generate as dummy_data_fn
 from litgpt.parser_config import parser_commands
 from litgpt.pretrain import setup as pretrain_fn
@@ -12,6 +13,7 @@ from litgpt.pretrain import setup as pretrain_fn
 PARSER_DATA = {
     "pretrain": pretrain_fn,
     "dummy_data": dummy_data_fn,
+    "generate": generate_fn,
 }
 
 

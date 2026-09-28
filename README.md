@@ -62,6 +62,22 @@ Parquet files (a directory or a glob works too) and `model_config.vocab_size` an
 
 To sample trajectories from a trained checkpoint:
 
+```bash
+litgpt generate out/pretrain/delphi-2m/final --cutoff_age 50 --num_samples 10 --termination_events '[death]'
+```
+
+It conditions each held-out person (`--split val`, the default) on what they experienced
+up to age 50 and simulates the rest of their life course. The model, the vocabulary and
+the persons all come from the checkpoint directory and the cache its config points at.
+To simulate other people, pass their silver-layer datasets as `--prompt_paths '[...]'`
+and `--prompt_person_path`, which get encoded with the checkpoint's vocabulary. The result,
+`out/generate/trajectories.parquet` by default, has the silver-layer columns
+`ID | TIME | EVENT`, plus `SAMPLE` and `GENERATED` (prompt or sampled). `<no_event>` rows
+are kept, so filter them out before feeding the file back into the data pipeline.
+`litgpt generate --help` lists all options.
+
+Or, from Python:
+
 ```python
 import torch
 from litgpt import Config
@@ -106,6 +122,8 @@ litgpt/life_events/
     loss.py              # competing-risks likelihood (loss_ce + loss_dt)
     generate.py          # generate_trajectories
 ```
+
+`litgpt/generate.py` wires `generate_trajectories` into the `litgpt generate` command.
 
 Training: `litgpt pretrain delphi-2m --data DelphiLifeEvents --data.event_paths '[...]' --data.person_path ...`. The `delphi-2m` config sets `model_class_name: Delphi`, which is how `litgpt.pretrain` picks the model class and its loss. Note that `--model_config.*` replaces the named config entirely, so when using it also pass `--model_config.model_class_name Delphi`. `pretrain` refuses to pair `DelphiLifeEvents` with any other model class.
 

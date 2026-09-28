@@ -29,7 +29,7 @@ from litgpt.life_events.data.source import BIRTH_ORIGIN
 from litgpt.life_events.data.store import SequenceStore
 from litgpt.life_events.delphi.mask import build_tie_mask
 
-__all__ = ["DelphiDataset", "DelphiLifeEvents", "delphi_collate_fn"]
+__all__ = ["DelphiDataset", "DelphiLifeEvents", "delphi_collate_fn", "insert_no_events", "no_event_ages"]
 
 DAYS_PER_YEAR = 365.25
 MAX_AGE_DAYS = 36525
@@ -50,6 +50,64 @@ PAD_AGE = -1
 """Age placeholder at padded positions. Never compared against a real age, because
 `build_tie_mask` drops padded keys via `pad_mask`; the negative value only keeps it
 from silently colliding with a genuine age of 0 if `pad_mask` is ever left out."""
+
+
+def no_event_ages(
+    mode: Literal["regular", "random"], rate: float, end_of_observation: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Ages, in days, at which no-event tokens go into a sequence observed until `end_of_observation`.
+
+    Args:
+        mode: `"regular"` for a fixed grid, `"random"` for uniform ages, as in Delphi.
+        rate: Years between no-event tokens.
+        end_of_observation: Last age at which the person is known to be observed.
+        rng: Source of the random ages. Unused by the regular grid.
+    """
+    if mode == "regular":
+        ages = np.arange(0.0, MAX_AGE_DAYS, DAYS_PER_YEAR * rate) + 1.0
+        ages = np.round(ages).astype(np.int64)
+    else:
+        ages = rng.integers(1, MAX_AGE_DAYS, size=int(100 / rate)).astype(np.int64)
+        ages.sort()
+    # Delphi's `masked_fill(ages > m, -1)`: nothing is known past the last observed
+    # event, so the censored tail is dropped rather than modelled.
+    return ages[ages <= end_of_observation]
+
+
+def insert_no_events(
+    tokens: np.ndarray,
+    ages: np.ndarray,
+    extra: np.ndarray,
+    features: dict[str, np.ndarray] | None = None,
+    feature_fills: dict[str, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Merges no-event tokens at the ages `extra` into a person's events.
+
+    Args:
+        tokens: Event token ids, in the order the cache gives them.
+        ages: Age of each event, in days.
+        extra: Ages of the no-event tokens, as `no_event_ages` returns them.
+        features: Optional per-event attribute arrays, aligned with `tokens`.
+        feature_fills: The value each of `features` takes at an inserted no-event token.
+
+    Returns:
+        `(tokens, ages, features)`, sorted by age.
+    """
+    features = features or {}
+    # A day that already carries an event is not a day on which nothing happened,
+    # and dropping the collision also settles where the stable sort would put it.
+    # Delphi never hits this because its ages are floats.
+    extra = extra[~np.isin(extra, ages)]
+    tokens = np.concatenate([tokens, np.full(extra.size, NO_EVENT_ID, dtype=tokens.dtype)])
+    ages = np.concatenate([ages, extra.astype(ages.dtype)])
+    features = {
+        name: np.concatenate([array, np.full(extra.size, feature_fills[name], dtype=array.dtype)])
+        for name, array in features.items()
+    }
+    # Stable, so the alphabetical order the cache gave co-occurring events
+    # survives, and the appended no-event tokens land after real ones at a tie.
+    order = np.argsort(ages, kind="stable")
+    return tokens[order], ages[order], {name: array[order] for name, array in features.items()}
 
 
 class DelphiDataset(Dataset):
@@ -134,18 +192,6 @@ class DelphiDataset(Dataset):
             epoch_seed = self._epoch if info is None else info.seed - info.id
         return np.random.default_rng([self.seed, int(epoch_seed) % 2**63, int(idx)])
 
-    def _no_event_ages(self, rng: np.random.Generator, end_of_observation: int) -> np.ndarray:
-        """Draw ages at which no-event tokens are inserted into the observed event sequences."""
-        if self.no_event_mode == "regular":
-            ages = np.arange(0.0, MAX_AGE_DAYS, DAYS_PER_YEAR * self.no_event_rate) + 1.0
-            ages = np.round(ages).astype(np.int64)
-        else:
-            ages = rng.integers(1, MAX_AGE_DAYS, size=int(100 / self.no_event_rate)).astype(np.int64)
-            ages.sort()
-        # Delphi's `masked_fill(ages > m, -1)`: nothing is known past the last observed
-        # event, so the censored tail is dropped rather than modelled.
-        return ages[ages <= end_of_observation]
-
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Draw a sequence from a single person."""
         sequence = self.store.sequence(int(self.indices[idx]))
@@ -156,22 +202,8 @@ class DelphiDataset(Dataset):
         rng = self._rng(idx)
 
         if self.no_event_mode != "none":
-            extra = self._no_event_ages(rng, int(ages[-1]))
-            # A day that already carries an event is not a day on which nothing happened,
-            # and dropping the collision also settles where the stable sort would put it.
-            # Delphi never hits this because its ages are floats.
-            extra = extra[~np.isin(extra, ages)]
-            tokens = np.concatenate([tokens, np.full(extra.size, NO_EVENT_ID, dtype=np.int64)])
-            ages = np.concatenate([ages, extra])
-            features = {
-                name: np.concatenate([array, np.full(extra.size, self.store.feature_fills[name], dtype=array.dtype)])
-                for name, array in features.items()
-            }
-            # Stable, so the alphabetical order the cache gave co-occurring events
-            # survives, and the appended no-event tokens land after real ones at a tie.
-            order = np.argsort(ages, kind="stable")
-            tokens, ages = tokens[order], ages[order]
-            features = {name: array[order] for name, array in features.items()}
+            extra = no_event_ages(self.no_event_mode, self.no_event_rate, int(ages[-1]), rng)
+            tokens, ages, features = insert_no_events(tokens, ages, extra, features, self.store.feature_fills)
 
         # One extra raw event, because the last one is only ever a target.
         width = self.max_seq_length + 1 if self.max_seq_length > 0 else ages.size
