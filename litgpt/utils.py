@@ -194,10 +194,9 @@ class CycleIterator:
 
 
 def CLI(*args: Any, **kwargs: Any) -> Any:
-    from jsonargparse import CLI, set_config_read_mode, set_docstring_parse_options
+    from jsonargparse import CLI, set_docstring_parse_options
 
     set_docstring_parse_options(attribute_docstrings=True)
-    set_config_read_mode(urls_enabled=True)
 
     return CLI(*args, **kwargs)
 

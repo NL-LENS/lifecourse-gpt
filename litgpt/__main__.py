@@ -3,7 +3,7 @@
 import warnings
 
 import torch
-from jsonargparse import CLI, set_config_read_mode, set_docstring_parse_options
+from jsonargparse import CLI, set_docstring_parse_options
 
 from litgpt.generate import setup as generate_fn
 from litgpt.life_events.dummy_data import generate as dummy_data_fn
@@ -27,7 +27,6 @@ def main() -> None:
     _check_commands()
 
     set_docstring_parse_options(attribute_docstrings=True)
-    set_config_read_mode(urls_enabled=True)
 
     # PyTorch bug that raises a false-positive warning
     # More info: https://github.com/Lightning-AI/litgpt/issues/1561
