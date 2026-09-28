@@ -331,3 +331,70 @@ def test_no_repeat_blocks_everything_not_repeatable():
     # Only events 4 and 5 are left to sample, once each; then nothing admissible remains.
     assert sorted(new_idx[0, 3:5].tolist()) == [4, 5]
     assert (new_idx[0, 5:] == PAD_ID).all()
+
+
+def test_target_vocab_size_defaults_to_the_vocabulary_and_is_bounded():
+    assert _config().target_vocab_size == 6
+    assert _config(target_vocab_size=4).target_vocab_size == 4
+    with pytest.raises(ValueError, match="target_vocab_size must be in"):
+        _config(target_vocab_size=7)
+
+
+def test_logits_past_target_vocab_size_do_not_enter_the_loss():
+    torch.manual_seed(0)
+    logits = torch.randn(2, 3, 4)
+    age = torch.tensor([[0, 10, 20], [0, 5, 5]])
+    targets = torch.tensor([[1, 2, 3], [0, 3, -100]])
+    targets_age = torch.tensor([[10, 20, 30], [5, 5, -1]])
+    pad_mask = targets != -100
+    args = (age, targets, targets_age, pad_mask)
+    expected = chunked_cross_entropy_exp_waiting_time(logits, *args)
+    # Two more entries, huge, as statics or padding could be: sliced away, they change nothing.
+    padded = torch.cat([logits, torch.full((2, 3, 2), 50.0)], dim=-1)
+    actual = chunked_cross_entropy_exp_waiting_time(padded, *args, target_vocab_size=4)
+    assert all(torch.allclose(expected[k], actual[k]) for k in expected)
+    unmasked = chunked_cross_entropy_exp_waiting_time(padded, *args)
+    assert unmasked["loss_ce"] > expected["loss_ce"] + 10
+
+
+def test_compute_loss_reads_target_vocab_size_from_the_config():
+    model = Delphi(_config(target_vocab_size=4, lm_head_bias=True))
+    model.apply(model._init_weights)
+    x = torch.tensor([[2, 3, 1, 2]])
+    batch = {
+        "input_ids": x,
+        "labels": torch.tensor([[3, 1, 2, 3]]),
+        "age": torch.tensor([[0, 10, 20, 30]]),
+        "targets_age": torch.tensor([[10, 20, 30, 40]]),
+        "pad_mask": torch.ones_like(x, dtype=torch.bool),
+    }
+    before = forward_loss(model, _unpack_batch(batch, model.max_seq_length))
+    with torch.no_grad():
+        model.lm_head.bias[4:] = 50.0
+    after = forward_loss(model, _unpack_batch(batch, model.max_seq_length))
+    assert all(torch.allclose(before[k], after[k]) for k in before)
+
+
+def test_generate_never_samples_past_target_vocab_size():
+    # Tokens 4 and 5 are statics: by far the likeliest logits, and in the prompt too.
+    model = Delphi(_config(block_size=16, lm_head_bias=True, target_vocab_size=4))
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+        model.lm_head.bias.fill_(0.0)
+        model.lm_head.bias[4:] = 50.0
+    idx, age = torch.tensor([[4, 5, 2]]), torch.tensor([[0, 0, 100]])
+    # `ignore_tokens` and `repeatable_tokens` may name ids past `target_vocab_size` harmlessly.
+    new_idx, _ = generate_trajectories(
+        model,
+        idx,
+        age,
+        max_new_tokens=8,
+        max_age=float("inf"),
+        no_repeat=True,
+        ignore_tokens=(PAD_ID, 5),
+        repeatable_tokens=(NO_EVENT_ID, 4),
+    )
+    sampled = new_idx[0, 3:]
+    assert not (sampled >= 4).any()
+    # Only 1 (repeatable) and 3 remain, and 2 is blocked by `no_repeat`.
+    assert set(sampled[sampled != PAD_ID].tolist()) <= {NO_EVENT_ID, 3}

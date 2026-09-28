@@ -630,6 +630,7 @@ def build_event_cache(
         "n_persons": int(ids.size),
         "n_events": n_events,
         "vocab_size": vocab.vocab_size,
+        "target_vocab_size": vocab.first_static_id,
         "stats": {k: int(v) for k, v in stats.items()},
         "time": {"origin": time_origin, "unit": TIME_UNIT, "offset_reference": "1970-01-01"},
         "filters": {"min_events": int(min_events), "min_time": None if min_time is None else int(min_time)},
@@ -667,7 +668,10 @@ def summarize(meta: dict, cache_dir: Path) -> str:
         dropped.append(f"{stats['n_dropped_min_events']:,} individuals under min_events={filters['min_events']}")
     if dropped:
         lines.append("  dropped: " + ", ".join(dropped))
-    lines.append(
-        f"  Set `vocab_size={meta['vocab_size']}` and `padded_vocab_size={meta['vocab_size']}` in the model config."
-    )
+    settings = f"`vocab_size={meta['vocab_size']}` and `padded_vocab_size={meta['vocab_size']}`"
+    if meta["target_vocab_size"] != meta["vocab_size"]:
+        settings = f"`vocab_size={meta['vocab_size']}`, `padded_vocab_size={meta['vocab_size']}` and " + (
+            f"`target_vocab_size={meta['target_vocab_size']}`"
+        )
+    lines.append(f"  Set {settings} in the model config.")
     return "\n".join(lines)

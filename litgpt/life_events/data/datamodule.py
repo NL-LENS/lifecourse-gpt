@@ -185,6 +185,13 @@ class LifeEventsDataModule(DataModule):
             self.vocab = EventVocab.load(self.cache_dir / "vocab.json", self.specials)
         return self.vocab.vocab_size
 
+    @property
+    def target_vocab_size(self) -> int:
+        """Vocabulary entries that are events, special tokens included: all but the statics."""
+        if self.vocab is None:
+            self.vocab = EventVocab.load(self.cache_dir / "vocab.json", self.specials)
+        return self.vocab.first_static_id
+
     def prepare_data(self) -> None:
         marker = self.cache_dir / "meta.json"
         if marker.is_file() and not self.force_prepare:

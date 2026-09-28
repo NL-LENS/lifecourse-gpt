@@ -31,6 +31,7 @@ def _checkpoint(tmp_path, dataset, config_kwargs=None, **data_kwargs):
         n_head=2,
         n_embd=8,
         rotary_percentage=0.0,
+        target_vocab_size=data.target_vocab_size,
         **(config_kwargs or {}),
     )
     torch.manual_seed(0)
@@ -146,7 +147,7 @@ def test_generate_conditions_on_statics_but_never_samples_them(tmp_path, static_
     checkpoint_dir, data = _checkpoint(
         tmp_path, static_dataset, config_kwargs=dict(lm_head_bias=True), static_fields=["GENDER", "MIGRATION"]
     )
-    # Make the statics by far the likeliest events, so only `ignore_tokens` keeps them out.
+    # Make the statics by far the likeliest events, so only `target_vocab_size` keeps them out.
     state = torch.load(checkpoint_dir / "lit_model.pth")
     state["model"]["lm_head.weight"][data.vocab.static_ids] = 0.0
     state["model"]["lm_head.bias"].zero_()[data.vocab.static_ids] = 50.0
@@ -163,3 +164,12 @@ def test_generate_conditions_on_statics_but_never_samples_them(tmp_path, static_
         ]
         assert all(days == 0 for days, _ in prompt[:2])
         assert not statics & {event for _, event, generated in rows if generated}
+
+
+def test_generate_refuses_a_model_whose_target_vocab_includes_the_statics(tmp_path, static_dataset):
+    checkpoint_dir, data = _checkpoint(tmp_path, static_dataset, static_fields=["GENDER"])
+    config = Config.from_file(checkpoint_dir / "model_config.yaml")
+    config.target_vocab_size = data.vocab_size
+    save_config(config, checkpoint_dir)
+    with pytest.raises(ValueError, match="target_vocab_size"):
+        generate(checkpoint_dir, out_path=tmp_path / "out.parquet", max_new_tokens=4)

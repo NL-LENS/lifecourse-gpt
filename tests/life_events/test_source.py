@@ -525,6 +525,7 @@ def test_static_fields_become_tokens_after_the_events(tmp_path, dataset, static_
         "MIGRATION=second",
     ]
     assert meta(data)["statics"] == ["GENDER", "MIGRATION"]
+    assert data.target_vocab_size == meta(data)["target_vocab_size"] == plain.vocab_size == plain.target_vocab_size
 
     store = data._store
     assert store.static_fields == ("GENDER", "MIGRATION")

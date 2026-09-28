@@ -17,6 +17,7 @@ def chunked_cross_entropy_exp_waiting_time(
     t_min: float = 0.0,
     chunk_size: int = 128,
     attn_mask: torch.Tensor | None = None,
+    target_vocab_size: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """Negative log-likelihood of a continuous-time competing-risks process.
 
@@ -38,10 +39,11 @@ def chunked_cross_entropy_exp_waiting_time(
     positions, so they are computed in one pass here rather than by calling
     `chunked_cross_entropy` separately.
 
-    Note that the sum runs over `config.padded_vocab_size`. Unused vocabulary entries
-    still contribute `exp(logit)` to the total rate, so with a vocabulary much smaller
-    than its padding the dead entries dominate at initialization. Set
-    `padded_vocab_size` to the real vocabulary size, or mask the unused logits.
+    The total rate runs over the first `target_vocab_size` logits only. Entries that can never
+    occur -- static person-level tokens, padding up to `padded_vocab_size` -- would
+    otherwise add `exp(logit)` for impossible events: the model would have to learn to
+    suppress them, which it only does slowly as they are never targets, and until it has,
+    the fitted rate would disagree with the one `generate_trajectories` samples from.
 
     Args:
         logits: Log rates, shape `(B, T, V)`, or the list of chunks produced by
@@ -66,6 +68,9 @@ def chunked_cross_entropy_exp_waiting_time(
             model could not see, which for a run of same-day events is a wait of zero
             floored to one day -- exactly the degenerate signal the tie mask exists to
             remove. See `last_visible_index`.
+        target_vocab_size: Number of leading logits that are possible outcomes, as
+            `config.target_vocab_size`. `None` uses them all. Every target inside `pad_mask`
+            must be one of them.
 
     Returns:
         `{"loss_ce": ..., "loss_dt": ...}`, each a scalar averaged over `pad_mask`.
@@ -73,6 +78,9 @@ def chunked_cross_entropy_exp_waiting_time(
     # See `chunked_cross_entropy` for why chunking bounds the backward memory spike.
     if isinstance(logits, list):
         logits = torch.cat(logits, dim=1)
+    if target_vocab_size is not None:
+        # Sliced rather than filled with -inf: nothing impossible ever enters the sum.
+        logits = logits[..., :target_vocab_size]
 
     logits = logits.reshape(-1, logits.size(-1))
     targets = targets.reshape(-1)

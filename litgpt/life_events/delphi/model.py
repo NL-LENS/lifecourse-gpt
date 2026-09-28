@@ -109,6 +109,7 @@ class Delphi(GPT):
             pad_mask=batch["pad_mask"],
             t_min=config.t_min,
             attn_mask=batch.get("attn_mask"),
+            target_vocab_size=config.target_vocab_size,
         )
         return {"loss": losses["loss_ce"] + losses["loss_dt"], **losses}
 

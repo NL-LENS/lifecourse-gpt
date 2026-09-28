@@ -129,6 +129,12 @@ class Config:
     # Distinct from the residual dropout: it drops whole event embeddings while leaving
     # the age signal intact, so the model cannot lean on any single event.
     token_dropout: float = 0.0
+    # Number of leading vocabulary entries that can be targets, i.e. possible outcomes of
+    # the time-to-event process. Only their logits enter the total event rate, in the loss
+    # and when sampling; the rest -- static person-level tokens, which the data module
+    # places last, and any padding up to `padded_vocab_size` -- can be read but never occur.
+    # `None` means `vocab_size`. Set it to the data module's `target_vocab_size`.
+    target_vocab_size: int | None = None
 
     def __post_init__(self):
         if self.head_size is None:
@@ -141,6 +147,13 @@ class Config:
         else:
             # vocab size shouldn't be larger than padded vocab size
             self.vocab_size = min(self.vocab_size, self.padded_vocab_size)
+
+        if self.target_vocab_size is None:
+            self.target_vocab_size = self.vocab_size
+        elif not 0 < self.target_vocab_size <= self.vocab_size:
+            raise ValueError(
+                f"target_vocab_size must be in (0, vocab_size={self.vocab_size}], got {self.target_vocab_size}"
+            )
 
         # compute the number of query groups
         if self.n_query_groups is not None:

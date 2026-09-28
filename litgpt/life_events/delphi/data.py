@@ -331,9 +331,9 @@ class DelphiLifeEvents(LifeEventsDataModule):
         `note_<name>`           -> one per `notes_fields` entry, aligned with `input_ids`
 
     Set both `vocab_size` and `padded_vocab_size` in the model config to this module's
-    `vocab_size`. Unused padded entries still contribute `exp(logit)` to the total event
-    rate in `chunked_cross_entropy_exp_waiting_time`, so a vocabulary much smaller than
-    its padding lets dead entries dominate at initialization.
+    `vocab_size`, and `target_vocab_size` to its `target_vocab_size`. With `static_fields`
+    the two differ: the static tokens are inputs only, and `target_vocab_size` keeps them
+    out of the total event rate in `chunked_cross_entropy_exp_waiting_time`.
 
     Two known reporting quirks, neither of which affects the training objective:
     Delphi excludes `<no_event>` from its *validation* metrics and this implementation

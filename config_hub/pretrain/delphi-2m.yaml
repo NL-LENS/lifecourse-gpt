@@ -21,6 +21,9 @@ model_config:
   # every unused entry still contributes exp(logit) to the total event rate.
   vocab_size: 15
   padded_vocab_size: 15
+  # Events that can occur, i.e. `vocab_size` minus the static tokens of `static_fields`.
+  # Unset means `vocab_size`, which is right when there are no static fields.
+  # target_vocab_size: 15
   n_layer: 12
   n_head: 12
   n_embd: 120

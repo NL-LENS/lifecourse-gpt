@@ -53,6 +53,10 @@ def generate_trajectories(
     to `t_min`, which caps the rate at `1 / t_min` and which the per-type form cannot
     express (the cap applies to the total rate, not to any individual one).
 
+    Only the first `model.config.target_vocab_size` logits are events that can occur, exactly as
+    in the loss, so static person-level tokens and vocabulary padding are never sampled
+    and never add to the total rate. They may still appear in the prompt.
+
     Past events are served from a KV cache, so each step only runs the newly sampled
     event through the model. That is exact: ages enter only through the input embedding,
     so the keys and values of an event never change once it has been appended, and the
@@ -76,8 +80,9 @@ def generate_trajectories(
         max_age: Stop a trajectory once its age passes this.
         termination_tokens: Event ids that end a trajectory, typically death. A
             trajectory that emits one is padded from then on.
-        ignore_tokens: Event ids that can never be sampled, such as padding. They keep
-            contributing to the total rate during training but must not be emitted.
+        ignore_tokens: Event ids that can never be sampled, such as padding. Unlike
+            the ids past `target_vocab_size`, they keep contributing to the total rate during
+            training but must not be emitted.
         no_repeat: Forbid sampling an event already present in the trajectory. Right for
             a vocabulary of one-off diagnoses, wrong for recurring events such as
             starting a job, so it is off by default.
@@ -112,9 +117,15 @@ def generate_trajectories(
         raise ValueError(f"Prompts must be right-padded: `pad_id={pad_id}` may only fill the end of a row")
 
     t_min = model.config.t_min if t_min is None else t_min
+    target_vocab_size = model.config.target_vocab_size
     terminators = torch.tensor(list(termination_tokens or ()), dtype=idx.dtype, device=idx.device)
-    ignored = torch.tensor(list(ignore_tokens or ()), dtype=torch.int64, device=idx.device)
-    repeatable = torch.tensor(list(repeatable_tokens or ()), dtype=torch.int64, device=idx.device)
+    # Ids past `target_vocab_size` are never sampled anyway, and would not index the sliced logits.
+    ignored = torch.tensor(
+        [i for i in ignore_tokens or () if i < target_vocab_size], dtype=torch.int64, device=idx.device
+    )
+    repeatable = torch.tensor(
+        [i for i in repeatable_tokens or () if i < target_vocab_size], dtype=torch.int64, device=idx.device
+    )
 
     was_training = model.training
     model.eval()
@@ -143,6 +154,7 @@ def generate_trajectories(
                 pad_id,
                 pad_age,
                 generator,
+                target_vocab_size,
             )
     finally:
         model.clear_kv_cache()
@@ -168,6 +180,7 @@ def _sample(
     pad_id: int,
     pad_age: float,
     generator: torch.Generator | None,
+    target_vocab_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The sampling loop of `generate_trajectories`.
 
@@ -217,12 +230,15 @@ def _sample(
                 input_pos=input_pos,
                 input_pos_maxp1=input_pos_maxp1,
             )[:, -1]
-        logits = logits.float()
+        vocab_width = logits.size(-1)
+        logits = logits[..., :target_vocab_size].float()
         if ignored.numel():
             logits.index_fill_(-1, ignored, -torch.inf)
         if no_repeat:
             # Also hits the padding of each row, which only ever holds `pad_id`.
-            seen = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, out_idx, True)
+            # Built over the whole vocabulary: the prompt may hold ids past `target_vocab_size`.
+            seen = torch.zeros(B, vocab_width, dtype=torch.bool, device=logits.device)
+            seen = seen.scatter_(-1, out_idx, True)[:, :target_vocab_size]
             if repeatable.numel():
                 seen.index_fill_(-1, repeatable, False)
             logits.masked_fill_(seen, -torch.inf)

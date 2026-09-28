@@ -76,7 +76,8 @@ def setup(
     kept, with the label `<no_event>`, and so are static tokens such as `GENDER=F`, dated
     at birth, so each trajectory is exactly the sequence the model saw and produced.
     Filter both out before feeding the file back into the data pipeline, which would
-    otherwise read them as events. Static tokens are never sampled.
+    otherwise read them as events. Static tokens are never sampled: they lie past the
+    model's `target_vocab_size`.
 
     Args:
         checkpoint_dir: A checkpoint directory written by `litgpt pretrain`, e.g.
@@ -152,6 +153,11 @@ def setup(
                 f"The vocabulary in {data.cache_dir} has {vocab.vocab_size} entries, the model was configured "
                 f"for vocab_size={model.config.vocab_size}. The cache no longer matches this checkpoint."
             )
+        if model.config.target_vocab_size != vocab.first_static_id:
+            raise ValueError(
+                f"The model was configured with target_vocab_size={model.config.target_vocab_size}, but {data.cache_dir} has "
+                f"{vocab.first_static_id} events before its {len(vocab.statics)} static tokens."
+            )
         termination = vocab.encode(termination_events or [])
         repeatable = vocab.encode([NO_EVENT_TOKEN] if repeatable_events is None else repeatable_events)
 
@@ -179,7 +185,6 @@ def setup(
                 max_new_tokens,
                 max_age=max_age * DAYS_PER_YEAR,
                 termination_tokens=termination,
-                ignore_tokens=(PAD_ID, *vocab.static_ids),
                 no_repeat=no_repeat,
                 repeatable_tokens=repeatable,
                 generator=generator,
