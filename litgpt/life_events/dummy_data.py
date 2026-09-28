@@ -5,7 +5,8 @@
 
 This data is not realistic on purpose. It creates two event datasets with *different* `NOTES` schemas, a
 separate person table with `BIRTHDATE`, dates at daily resolution, and life courses long
-enough that windowing and `<no_event>` insertion actually do something. Nothing here is
+enough that windowing and `<no_event>` insertion actually do something. The person table
+also carries a static `GENDER`, missing for some, to try out `static_fields` with. Nothing here is
 based on real statistics, and no conclusion should be drawn from a model trained on it. Use as follows:
 
     python -m litgpt.life_events.dummy_data --out_dir data/dummy_life_events
@@ -134,8 +135,16 @@ def generate(out_dir: Path = Path("data/dummy_life_events"), n_persons: int = 20
         )
         pq.write_table(table, out_dir / f"{name}.parquet")
 
+    # Drawn last, so adding it left every other column of the data unchanged.
+    genders = [None if rng.random() < 0.02 else str(g) for g in rng.choice(["F", "M"], size=n_persons)]
     pq.write_table(
-        pa.table({"ID": pa.array(ids, pa.string()), "BIRTHDATE": pa.array(births, pa.date32())}),
+        pa.table(
+            {
+                "ID": pa.array(ids, pa.string()),
+                "BIRTHDATE": pa.array(births, pa.date32()),
+                "GENDER": pa.array(genders, pa.string()),
+            }
+        ),
         out_dir / "persons.parquet",
     )
 

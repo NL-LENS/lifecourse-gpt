@@ -24,11 +24,24 @@ def write_parquet(path, rows, notes_sql):
     return path
 
 
-def write_persons(path, birthdates=BIRTHDATES):
+STATICS = {"GENDER": {"a": "F", "b": "M", "c": None}, "MIGRATION": {"a": "none", "b": "second", "c": "none"}}
+
+
+def write_persons(path, birthdates=BIRTHDATES, statics=None):
+    """`statics`: `{column: {id: value or None}}`, extra VARCHAR columns of the person table."""
     import duckdb
 
-    values = ", ".join(f"('{i}', DATE '{d}')" for i, d in birthdates.items())
-    duckdb.connect().execute(f"COPY (SELECT * FROM (VALUES {values}) AS t(ID, BIRTHDATE)) TO '{path}' (FORMAT PARQUET)")
+    statics = statics or {}
+
+    def literal(value):
+        return "CAST(NULL AS VARCHAR)" if value is None else f"'{value}'"
+
+    values = ", ".join(
+        "(" + ", ".join([f"'{i}'", f"DATE '{d}'", *(literal(statics[c][i]) for c in statics)]) + ")"
+        for i, d in birthdates.items()
+    )
+    columns = ", ".join(["ID", "BIRTHDATE", *statics])
+    duckdb.connect().execute(f"COPY (SELECT * FROM (VALUES {values}) AS t({columns})) TO '{path}' (FORMAT PARQUET)")
     return path
 
 

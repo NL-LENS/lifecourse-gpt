@@ -60,6 +60,13 @@ To train on real data, `data.init_args.event_paths` and `person_path` should poi
 Parquet files (a directory or a glob works too) and `model_config.vocab_size` and
 `padded_vocab_size` should be set to the `vocab_size` that `--prepare_data_only true` prints.
 
+Static person-level attributes such as gender or migration background are columns of the
+person dataset, named in `data.init_args.static_fields` (e.g. `--data.init_args.static_fields '[GENDER]'`).
+Each value becomes a token `GENDER=F`, and a missing value becomes `GENDER=<unknown>`. These tokens
+come last in the vocabulary, so they count towards `vocab_size`. As in Delphi, they open every
+sequence at age 0 and are only read by the model: they survive windowing, are never prediction
+targets, are shuffled in training (`shuffle_statics`) and are never sampled by `litgpt generate`.
+
 To sample trajectories from a trained checkpoint:
 
 ```bash

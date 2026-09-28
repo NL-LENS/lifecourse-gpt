@@ -508,3 +508,72 @@ def test_duckdb_settings_reach_the_connection(tmp_path, dataset, monkeypatch):
     assert seen["temp_directory"] == str(spill)
     # And the cache it produced is the usual one.
     assert meta(data)["n_events"] == 11
+
+
+def test_static_fields_become_tokens_after_the_events(tmp_path, dataset, static_dataset):
+    plain = prepared(tmp_path / "plain", dataset)
+    data = prepared(tmp_path / "static", static_dataset, static_fields=["GENDER", "MIGRATION"])
+    # Statics come last, so they renumber no event.
+    assert data.vocab.events == plain.vocab.events
+    assert data.vocab.first_static_id == plain.vocab.vocab_size
+    assert data.vocab.statics == [
+        "GENDER=<unknown>",
+        "GENDER=F",
+        "GENDER=M",
+        "MIGRATION=<unknown>",
+        "MIGRATION=none",
+        "MIGRATION=second",
+    ]
+    assert meta(data)["statics"] == ["GENDER", "MIGRATION"]
+
+    store = data._store
+    assert store.static_fields == ("GENDER", "MIGRATION")
+    assert store.statics.shape == (3, 2)
+    labels = {str(i): data.vocab.decode(row.tolist()) for i, row in zip(store.ids, np.asarray(store.statics))}
+    assert labels == {
+        "a": ["GENDER=F", "MIGRATION=none"],
+        "b": ["GENDER=M", "MIGRATION=second"],
+        "c": ["GENDER=<unknown>", "MIGRATION=none"],
+    }
+    # The event stream itself is untouched.
+    assert np.array_equal(np.asarray(store.tokens), np.asarray(plain._store.tokens))
+
+
+def test_without_static_fields_the_statics_are_empty(tmp_path, dataset):
+    data = prepared(tmp_path, dataset)
+    assert data._store.statics.shape == (3, 0)
+    assert data.vocab.statics == [] and data.vocab.static_ids == []
+
+
+def test_loaded_vocab_maps_unseen_static_values_to_unknown(tmp_path, dataset, static_dataset):
+    trained = prepared(tmp_path / "trained", static_dataset, static_fields=["GENDER"])
+    event_paths, _ = dataset
+    persons = write_persons(tmp_path / "other.parquet", statics={"GENDER": {"a": "X", "b": "M", "c": "F"}})
+    data = prepared(
+        tmp_path / "other",
+        (event_paths, str(persons)),
+        static_fields=["GENDER"],
+        vocab_path=trained.cache_dir / "vocab.json",
+    )
+    labels = {str(i): data.vocab.decode(row.tolist())[0] for i, row in zip(data._store.ids, data._store.statics)}
+    assert labels == {"a": "GENDER=<unknown>", "b": "GENDER=M", "c": "GENDER=F"}
+
+    # A vocabulary that never had the field cannot place it at all.
+    with pytest.raises(ValueError, match="static field 'MIGRATION'"):
+        prepared(
+            tmp_path / "missing",
+            static_dataset,
+            static_fields=["MIGRATION"],
+            vocab_path=trained.cache_dir / "vocab.json",
+        )
+
+
+def test_static_fields_need_a_person_dataset_and_a_matching_cache(tmp_path, dataset, static_dataset):
+    event_paths, _ = dataset
+    with pytest.raises(ValueError, match="`person_path` is required with `static_fields`"):
+        PlainLifeEvents(event_paths=event_paths, time_origin="epoch", static_fields=["GENDER"])
+
+    prepared(tmp_path, static_dataset, static_fields=["GENDER"])
+    stale = make_module(tmp_path, static_dataset)
+    with pytest.raises(ValueError, match="was built with static_fields"):
+        stale.setup()

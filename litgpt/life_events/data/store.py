@@ -40,6 +40,10 @@ class SequenceStore:
             calendar time reads one array and shifts it, rather than storing two.
         features: Note event attribute arrays, keyed by their batch name (`note_<name>`).
         feature_fills: The value each note event attribute takes where an event lacks it.
+        statics: Each person's static attribute tokens, shape `(len(ids), len(static_fields))`.
+            Timeless, so they are not part of the event stream; a dataset decides where
+            to put them.
+        static_fields: The person-dataset columns `statics` was read from, in column order.
         vocab: The event vocabulary.
     """
 
@@ -52,6 +56,8 @@ class SequenceStore:
     time_offsets: np.ndarray
     features: dict[str, np.ndarray]
     feature_fills: dict[str, float]
+    statics: np.ndarray
+    static_fields: tuple[str, ...]
     vocab: EventVocab
 
     @classmethod
@@ -78,6 +84,8 @@ class SequenceStore:
             time_unit=meta["time"].get("unit", TIME_UNIT),
             features={note_column(name): load(cache_dir / f"{note_column(name)}.npy") for name in specs},
             feature_fills={note_column(name): spec.fill for name, spec in specs.items()},
+            statics=load(cache_dir / "statics.npy"),
+            static_fields=tuple(meta["statics"]),
             vocab=EventVocab.load(cache_dir / "vocab.json", specials),
         )
 

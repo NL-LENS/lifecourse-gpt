@@ -125,10 +125,17 @@ class DelphiDataset(Dataset):
     100-year horizon and truncated at it, everything is merged and re-sorted by age, and
     only then is a window taken and the causal shift applied.
 
+    Static person-level tokens, if the cache has any, are prepended only after all of
+    this, at age 0, so that no window can cut them off. They are inputs only: their own
+    labels are set to `ignore_index`. So is the label of the first windowed event
+    whenever the window does not start at the beginning, since the wait from age 0 to it
+    would claim that nothing happened in between. This mirrors Delphi, whose sex and
+    lifestyle tokens open every sequence and are never predicted.
+
     Note features, if the cache has any, travel with their events through all of this.
-    Inserted no-event tokens take each feature's fill value. They are emitted aligned
-    with `input_ids`, as floats or int64 depending on their type. Delphi itself ignores
-    them.
+    Inserted no-event and static tokens take each feature's fill value. They are emitted
+    aligned with `input_ids`, as floats or int64 depending on their type. Delphi itself
+    ignores them.
 
     Args:
         store: The prepared cache.
@@ -140,6 +147,9 @@ class DelphiDataset(Dataset):
         seed: Base entropy for the per-sample RNG.
         resample: Draw fresh no-event tokens every epoch. Off for validation, so the
             metric is comparable across evaluations.
+        shuffle_statics: Put the static tokens in a random order in every sample, so the
+            model cannot learn anything from their order.
+        ignore_index: Label of the positions excluded from the loss.
     """
 
     def __init__(
@@ -153,7 +163,14 @@ class DelphiDataset(Dataset):
         select: str = "random",
         seed: int = 42,
         resample: bool = True,
+        shuffle_statics: bool = False,
+        ignore_index: int = -100,
     ) -> None:
+        n_statics = store.statics.shape[1]
+        if 0 < max_seq_length <= n_statics:
+            raise ValueError(
+                f"max_seq_length={max_seq_length} leaves no room for events after {n_statics} static tokens"
+            )
         self.store = store
         self.indices = indices
         self.max_seq_length = max_seq_length
@@ -162,6 +179,8 @@ class DelphiDataset(Dataset):
         self.select = select
         self.seed = seed
         self.resample = resample
+        self.shuffle_statics = shuffle_statics
+        self.ignore_index = ignore_index
         self._epoch = 0
 
     def __len__(self) -> int:
@@ -194,7 +213,8 @@ class DelphiDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Draw a sequence from a single person."""
-        sequence = self.store.sequence(int(self.indices[idx]))
+        person = int(self.indices[idx])
+        sequence = self.store.sequence(person)
         # `astype` also copies out of the read-only memmap, which `torch.from_numpy` needs.
         tokens = sequence.pop("tokens").astype(np.int64)
         ages = sequence.pop("times").astype(np.int64)
@@ -205,8 +225,11 @@ class DelphiDataset(Dataset):
             extra = no_event_ages(self.no_event_mode, self.no_event_rate, int(ages[-1]), rng)
             tokens, ages, features = insert_no_events(tokens, ages, extra, features, self.store.feature_fills)
 
-        # One extra raw event, because the last one is only ever a target.
-        width = self.max_seq_length + 1 if self.max_seq_length > 0 else ages.size
+        # One extra raw event, because the last one is only ever a target. The static
+        # tokens take their share of the length, so windows get shorter, not batches longer.
+        statics = self.store.statics[person].astype(np.int64)
+        width = self.max_seq_length + 1 - statics.size if self.max_seq_length > 0 else ages.size
+        start = 0
         if ages.size > width:
             if self.select == "left":
                 start = 0
@@ -218,9 +241,24 @@ class DelphiDataset(Dataset):
             tokens, ages = tokens[window], ages[window]
             features = {name: array[window] for name, array in features.items()}
 
+        labels = tokens[1:]
+        if statics.size:
+            if self.shuffle_statics:
+                statics = rng.permutation(statics)
+            tokens = np.concatenate([statics, tokens])
+            ages = np.concatenate([np.zeros(statics.size, dtype=ages.dtype), ages])
+            features = {
+                name: np.concatenate([np.full(statics.size, self.store.feature_fills[name], dtype=array.dtype), array])
+                for name, array in features.items()
+            }
+            labels = tokens[1:].copy()
+            # Statics are read, never predicted. The first event is a target only when
+            # the window starts at birth; otherwise its wait from age 0 would be a lie.
+            labels[: statics.size - 1 + int(start > 0)] = self.ignore_index
+
         return {
             "input_ids": torch.from_numpy(tokens[:-1]),
-            "labels": torch.from_numpy(tokens[1:]),
+            "labels": torch.from_numpy(labels),
             "age": torch.from_numpy(ages[:-1]),
             "targets_age": torch.from_numpy(ages[1:]),
             **{name: torch.from_numpy(array[:-1]) for name, array in features.items()},
@@ -267,10 +305,12 @@ def delphi_collate_fn(
     for name, fill in (feature_fills or {}).items():
         batch[name] = pad(name, fill)
     # `<no_event>` is an ordinary token id, so positions whose target is one stay True
-    # here and do contribute to both loss terms -- only right-padding is excluded.
+    # here and do contribute to both loss terms. Right-padding is excluded, and so are
+    # positions whose target is a static token.
     batch["pad_mask"] = batch["labels"] != ignore_index
     if include_attn_mask:
-        batch["attn_mask"] = build_tie_mask(batch["age"], batch["targets_age"], batch["pad_mask"])
+        # Not `pad_mask`: a static token has no target but must stay visible as a key.
+        batch["attn_mask"] = build_tie_mask(batch["age"], batch["targets_age"], batch["input_ids"] != pad_id)
     return batch
 
 
@@ -279,12 +319,14 @@ class DelphiLifeEvents(LifeEventsDataModule):
     """Life-course event batches in the layout `litgpt.life_events.delphi.model.Delphi` trains on.
 
     See `LifeEventsDataModule` for how the "silver" layer event datasets are read. This class adds
-    Delphi's `<no_event>` token and the tie mask.
+    Delphi's `<no_event>` token and the tie mask, and opens every sequence with the
+    person's `static_fields` tokens at age 0, which are never predicted.
 
     Batches are dicts of `(B, T)` tensors, plus a `(B, 1, T, T)` mask:
         `input_ids`, `age`      -> `Delphi.forward(idx=..., age=...)`
         `labels`, `targets_age` -> the cross-entropy target and its age
-        `pad_mask`              -> `True` at real tokens
+        `pad_mask`              -> `True` at positions in the loss: real tokens whose
+                                   target is not padding or a static token
         `attn_mask`             -> causal + padding + tie mask, for `Delphi.forward`
         `note_<name>`           -> one per `notes_fields` entry, aligned with `input_ids`
 
@@ -319,6 +361,9 @@ class DelphiLifeEvents(LifeEventsDataModule):
     include_attn_mask: bool = True
     """Build the tie mask in the collate function. Turn this off to train with plain
     causal masking, or to build the mask yourself."""
+    shuffle_statics: bool = True
+    """Shuffle the order of the static tokens in every training sample. Validation keeps
+    the cache's order."""
     pad_to_max_seq_length: bool = True
     """Pad every batch to `max_seq_length` rather than to the longest sample, keeping
     shapes stable for `torch.compile`."""
@@ -335,10 +380,19 @@ class DelphiLifeEvents(LifeEventsDataModule):
             raise ValueError(f"no_event_rate must be positive, got {self.no_event_rate}")
 
     def make_dataset(self, store: SequenceStore, indices: np.ndarray, train: bool) -> DelphiDataset:
-        common = dict(no_event_mode=self.no_event_mode, no_event_rate=self.no_event_rate)
+        common = dict(
+            no_event_mode=self.no_event_mode, no_event_rate=self.no_event_rate, ignore_index=self.ignore_index
+        )
         if train:
             return DelphiDataset(
-                store, indices, self.max_seq_length, select=self.select, seed=self.seed, resample=True, **common
+                store,
+                indices,
+                self.max_seq_length,
+                select=self.select,
+                seed=self.seed,
+                resample=True,
+                shuffle_statics=self.shuffle_statics,
+                **common,
             )
         # `select="left"` and no resampling, so the metric is comparable across
         # evaluations; `seed + 1` so val never draws the same grid as train for an index.

@@ -73,9 +73,10 @@ def setup(
     The output has the silver-layer schema `ID | TIME | EVENT`, one row per event, plus
     `SAMPLE` (which of the `num_samples` trajectories of that person the row belongs to)
     and `GENERATED` (false for the prompt, true for sampled events). No-event tokens are
-    kept, with the label `<no_event>`, so each trajectory is exactly the sequence the model
-    saw and produced. Filter them out before feeding the file back into the data pipeline,
-    which would otherwise read them as events.
+    kept, with the label `<no_event>`, and so are static tokens such as `GENDER=F`, dated
+    at birth, so each trajectory is exactly the sequence the model saw and produced.
+    Filter both out before feeding the file back into the data pipeline, which would
+    otherwise read them as events. Static tokens are never sampled.
 
     Args:
         checkpoint_dir: A checkpoint directory written by `litgpt pretrain`, e.g.
@@ -85,8 +86,9 @@ def setup(
         prompt_paths: Silver-layer event datasets to take the prompts from, each a Parquet
             file, a directory or a glob, with the columns the training data used. `None`
             takes them from the checkpoint's prepared cache instead.
-        prompt_person_path: The person dataset carrying `BIRTHDATE` for `prompt_paths`.
-            Required with `prompt_paths`, since ages are measured from birth.
+        prompt_person_path: The person dataset carrying `BIRTHDATE` for `prompt_paths`,
+            and the `static_fields` the checkpoint was trained with. Required with
+            `prompt_paths`, since ages are measured from birth.
         split: Which persons of the prepared cache to simulate: the validation split the
             checkpoint held out, the training split, or everyone. Ignored with
             `prompt_paths`, which are always simulated in full.
@@ -177,7 +179,7 @@ def setup(
                 max_new_tokens,
                 max_age=max_age * DAYS_PER_YEAR,
                 termination_tokens=termination,
-                ignore_tokens=(PAD_ID,),
+                ignore_tokens=(PAD_ID, *vocab.static_ids),
                 no_repeat=no_repeat,
                 repeatable_tokens=repeatable,
                 generator=generator,
@@ -272,6 +274,7 @@ def _encode_prompts(
         time_column=data.time_column,
         event_column=data.event_column,
         birthdate_column=data.birthdate_column,
+        static_fields=data.static_fields,
         # A single event is a usable prompt, unlike a training sequence.
         min_events=1,
         distinct_events=data.distinct_events,
@@ -291,7 +294,8 @@ def _build_prompt(
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Person `i`'s conditioning `(tokens, ages)`, or `None` if nothing is observed by `cutoff`.
 
-    Holds the person's most recent events.
+    Opens with the person's static tokens at age 0, as training samples do, followed by
+    their most recent events.
     """
     sequence = store.sequence(i)
     tokens, ages = sequence["tokens"].astype(np.int64), sequence["times"].astype(np.int64)
@@ -310,7 +314,12 @@ def _build_prompt(
             # last event and could place new events inside the observed, quiet stretch.
             extra = np.union1d(extra, [cutoff])
         tokens, ages, _ = insert_no_events(tokens, ages, extra)
-    return tokens[-max_length:], ages[-max_length:]
+    statics = store.statics[i].astype(np.int64)
+    n_events = max_length - statics.size
+    if n_events <= 0:
+        raise ValueError(f"A prompt of {max_length} tokens leaves no room for events after {statics.size} static ones")
+    tokens, ages = tokens[-n_events:], ages[-n_events:]
+    return np.concatenate([statics, tokens]), np.concatenate([np.zeros(statics.size, dtype=ages.dtype), ages])
 
 
 def _chunks(rows: list, size: int) -> Iterator[list]:

@@ -6,10 +6,11 @@
 All heavy data-processing operations are performed here.
 
 Events arrive as one or more Parquet datasets sharing the schema
-`ID | TIME | EVENT | NOTES`, plus a person-attributes dataset carrying `BIRTHDATE`.
-`build_event_cache` merges the datasets, places every event on a time axis, orders
-co-occurring events alphabetically and writes one flat, memory-mapped event stream plus
-per-person offsets. See `store.SequenceStore` for the layout.
+`ID | TIME | EVENT | NOTES`, plus a person-attributes dataset carrying `BIRTHDATE` and,
+optionally, static attributes such as gender. `build_event_cache` merges the datasets,
+places every event on a time axis, orders co-occurring events alphabetically and writes
+one flat, memory-mapped event stream plus per-person offsets and static tokens. See
+`store.SequenceStore` for the layout.
 """
 
 import json
@@ -23,12 +24,13 @@ from typing import Any, Literal
 import numpy as np
 
 from litgpt.constants import _DUCKDB_AVAILABLE, _PYARROW_AVAILABLE
-from litgpt.life_events.data.vocab import EventVocab
+from litgpt.life_events.data.vocab import UNKNOWN_STATIC, EventVocab, static_label
 
 __all__ = ["CACHE_VERSION", "TIME_UNIT", "NoteField", "build_event_cache", "summarize", "time_expr"]
 
-CACHE_VERSION = 4
-"""Version 4 added `time_offsets.npy`, which re-bases `times.npy` onto any other origin."""
+CACHE_VERSION = 5
+"""Version 4 added `time_offsets.npy`, which re-bases `times.npy` onto any other origin.
+Version 5 added `statics.npy`, the static person-level tokens."""
 
 TIME_UNIT = "day"
 """The unit every time coordinate is expressed in.
@@ -339,9 +341,14 @@ def _write_event_stream(
         arrays.clear()
 
 
-def _resolve_vocab(con: Any, specials: Sequence[str], vocab_path: Path | None, time_ok: str) -> EventVocab:
+def _resolve_vocab(con: Any, specials: Sequence[str], vocab_path: Path | None, time_ok: str) -> tuple[EventVocab, bool]:
+    """The vocabulary at `vocab_path` if there is one, else the events found in the data.
+
+    Returns the vocabulary and whether it was loaded. A derived one is not saved here:
+    its static labels are only known once the individuals that survive are.
+    """
     if vocab_path is not None and Path(vocab_path).is_file():
-        return EventVocab.load(Path(vocab_path), specials)
+        return EventVocab.load(Path(vocab_path), specials), True
     # Scanned straight off the Parquet view rather than a materialised table: a
     # distinct aggregate holds only the labels, not the corpus. The join and the time
     # filter mirror `_events`, so the vocabulary has no entry that never survives --
@@ -355,10 +362,41 @@ def _resolve_vocab(con: Any, specials: Sequence[str], vocab_path: Path | None, t
             f"WHERE s.event IS NOT NULL AND s.time IS NOT NULL AND {time_ok} ORDER BY event"
         ).fetchall()
     ]
-    vocab = EventVocab(labels, specials)
-    if vocab_path is not None:
-        vocab.save(Path(vocab_path))
-    return vocab
+    return EventVocab(labels, specials), False
+
+
+def _static_tokens(
+    fields: Sequence[str], values: Mapping[str, np.ndarray], vocab: EventVocab, loaded: bool, specials: Sequence[str]
+) -> tuple[np.ndarray, EventVocab]:
+    """Encodes each person's static attribute values as tokens, shape `(n_persons, len(fields))`.
+
+    A derived vocabulary gets one label per value that occurs, plus `<unknown>` per field,
+    so that prompts encoded later with this vocabulary have somewhere to put a value
+    unseen in training. A loaded vocabulary maps an unseen value to that `<unknown>`.
+    """
+    uniques, inverses = {}, {}
+    for field in fields:
+        uniques[field], inverses[field] = np.unique(values[field].astype(np.str_), return_inverse=True)
+    if not loaded:
+        statics = sorted(
+            {static_label(field, v) for field in fields for v in [*uniques[field].tolist(), UNKNOWN_STATIC]}
+        )
+        vocab = EventVocab(vocab.events, specials, statics)
+    statics = np.empty((len(values[fields[0]]), len(fields)), dtype=np.int64)
+    for j, field in enumerate(fields):
+        ids = []
+        for value in uniques[field].tolist():
+            label = static_label(field, value)
+            if label not in vocab.stoi:
+                label = static_label(field, UNKNOWN_STATIC)
+            if label not in vocab.stoi:
+                raise ValueError(
+                    f"The vocabulary knows neither {static_label(field, value)!r} nor {label!r}. "
+                    f"It was not built with the static field {field!r}."
+                )
+            ids.append(vocab.stoi[label])
+        statics[:, j] = np.asarray(ids, dtype=np.int64)[inverses[field]]
+    return statics, vocab
 
 
 def build_event_cache(
@@ -376,6 +414,7 @@ def build_event_cache(
     notes_column: str = "NOTES",
     birthdate_column: str = "BIRTHDATE",
     notes_fields: Mapping[str, NoteField] | None = None,
+    static_fields: Sequence[str] = (),
     min_events: int = 2,
     distinct_events: bool = True,
     on_missing_birthdate: Literal["drop", "error"] = "drop",
@@ -397,10 +436,18 @@ def build_event_cache(
         if not name.isidentifier():
             raise ValueError(f"notes_fields key {name!r} must be a valid identifier, it names a file and a batch key")
 
+    static_fields = list(static_fields)
+    if len(set(static_fields)) != len(static_fields):
+        raise ValueError(f"static_fields contains duplicates: {static_fields}")
+
     time_sql = time_expr(time_origin)
     use_birthdate = needs_birthdate(time_origin)
     if use_birthdate and person_path is None:
         raise ValueError(f"time_origin={time_origin!r} measures from BIRTHDATE, so `person_path` is required")
+    if static_fields and person_path is None:
+        raise ValueError("`static_fields` are read from the person dataset, so `person_path` is required")
+    # Carried under positional names, so no column name ever needs quoting past the read.
+    static_columns = [f"static_{j}" for j in range(len(static_fields))]
 
     con = _connect_duckdb(duckdb_threads, duckdb_memory_limit, duckdb_temp_directory)
     try:
@@ -409,10 +456,14 @@ def build_event_cache(
             con, event_paths, id_column, time_column, event_column, id_type, notes_column, notes_fields
         ).create_view("_silver")
         if person_path is not None:
+            statics_sql = "".join(
+                f", CAST({_quote_ident(field)} AS VARCHAR) AS {column}"
+                for field, column in zip(static_fields, static_columns)
+            )
             con.execute(
                 f"CREATE TEMP TABLE _persons AS SELECT "
                 f"CAST({_quote_ident(id_column)} AS {id_type}) AS id, "
-                f"CAST({_quote_ident(birthdate_column)} AS DATE) AS birthdate "
+                f"CAST({_quote_ident(birthdate_column)} AS DATE) AS birthdate{statics_sql} "
                 f"FROM read_parquet(?)",
                 [_expand_entry(str(person_path))],
             )
@@ -438,7 +489,7 @@ def build_event_cache(
         # id string: the only table holding VARCHAR is this one, at one row per
         # individual rather than one per event.
         con.execute(
-            "CREATE TEMP TABLE _person AS SELECT id, birthdate, "
+            f"CREATE TEMP TABLE _person AS SELECT id, birthdate{''.join(', ' + c for c in static_columns)}, "
             "CAST(row_number() OVER (ORDER BY id) - 1 AS INTEGER) AS person_idx FROM _persons"
         )
         con.execute("DROP TABLE _persons")
@@ -447,7 +498,7 @@ def build_event_cache(
         # unknown-event count have to share it, or a row dropped for its time gets
         # reported a second time as an unknown label.
         time_ok = f"{time_sql} IS NOT NULL" if min_time is None else f"{time_sql} >= {int(min_time)}"
-        vocab = _resolve_vocab(con, specials, vocab_path, time_ok)
+        vocab, vocab_loaded = _resolve_vocab(con, specials, vocab_path, time_ok)
         # `rank` is the *alphabetical* position, which `token` only coincides with
         # when the vocabulary was derived from the data. An overridden `vocab_path`
         # may be in any order, and co-occurring events still have to come out
@@ -526,8 +577,11 @@ def build_event_cache(
         per_person = con.execute("SELECT person_idx, n FROM _keep ORDER BY person_idx").fetchnumpy()
         # Back to real ids only at the very end, for the individuals that survived,
         # in whichever type the sources used.
+        statics_select = "".join(
+            f", COALESCE(p.{column}, {_quote_literal(UNKNOWN_STATIC)}) AS {column}" for column in static_columns
+        )
         per_person_columns = con.execute(
-            f"SELECT p.id, {time_offset_expr(time_origin)} AS time_offset "
+            f"SELECT p.id, {time_offset_expr(time_origin)} AS time_offset{statics_select} "
             f"FROM _keep k JOIN _person p USING (person_idx) ORDER BY k.person_idx"
         ).fetchnumpy()
         raw_ids = per_person_columns["id"]
@@ -545,6 +599,15 @@ def build_event_cache(
         np.save(cache_dir / "ids.npy", ids, allow_pickle=False)
         np.save(cache_dir / "offsets.npy", offsets, allow_pickle=False)
         np.save(cache_dir / "time_offsets.npy", time_offsets, allow_pickle=False)
+        if static_fields:
+            values = {
+                field: _to_numpy(per_person_columns[column], object)
+                for field, column in zip(static_fields, static_columns)
+            }
+            statics, vocab = _static_tokens(static_fields, values, vocab, vocab_loaded, specials)
+        else:
+            statics = np.empty((ids.size, 0), dtype=np.int64)
+        np.save(cache_dir / "statics.npy", statics.astype(_token_dtype(vocab)), allow_pickle=False)
         # The per-person counts already fix the output shape exactly, so the event
         # stream can be written straight into pre-sized files without ever holding
         # the whole corpus in Python.
@@ -558,6 +621,8 @@ def build_event_cache(
     if n_written != n_events:
         raise RuntimeError(f"per-person counts ({n_events}) disagree with the flat event stream ({n_written})")
     vocab.save(cache_dir / "vocab.json")
+    if vocab_path is not None and not vocab_loaded:
+        vocab.save(Path(vocab_path))
 
     stats["n_dropped_min_events"] = int(n_persons_before_min_events) - int(ids.size)
     return {
@@ -571,6 +636,7 @@ def build_event_cache(
         "features": {
             name: {"field": spec.field, "dtype": spec.dtype, "fill": spec.fill} for name, spec in notes_fields.items()
         },
+        "statics": static_fields,
         "id_type": id_type,
         "sources": {"events": list(event_paths), "persons": None if person_path is None else str(person_path)},
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -586,6 +652,8 @@ def summarize(meta: dict, cache_dir: Path) -> str:
     ]
     if meta["features"]:
         lines.append("  note features: " + ", ".join(meta["features"]))
+    if meta["statics"]:
+        lines.append("  static fields: " + ", ".join(meta["statics"]))
     dropped = []
     if stats["n_no_birthdate"]:
         dropped.append(

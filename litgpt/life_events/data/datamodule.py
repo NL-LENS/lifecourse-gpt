@@ -82,6 +82,10 @@ class LifeEventsDataModule(DataModule):
     """Attributes to read out of `NOTES`, keyed by the name they get in the cache and in
     batches (`note_<name>`). Empty by default: `NOTES` is then never read at all. Whether
     a model uses them is up to the subclass."""
+    static_fields: list[str] = field(default_factory=list)
+    """Columns of the person dataset holding static attributes, e.g. `["GENDER"]`. Each
+    value becomes a vocabulary token `"GENDER=<value>"`, missing values `"GENDER=<unknown>"`.
+    Requires `person_path`. Where the tokens go in a sample is up to the subclass."""
 
     min_events: int = 2
     """Drop individuals with fewer events than this. Two is the floor: one event has no
@@ -134,6 +138,8 @@ class LifeEventsDataModule(DataModule):
             raise ValueError("`event_paths` must name at least one event dataset")
         if self.person_path is None and needs_birthdate(self.time_origin):
             raise ValueError(f"`person_path` is required for time_origin={self.time_origin!r}, it supplies BIRTHDATE")
+        if self.person_path is None and self.static_fields:
+            raise ValueError("`person_path` is required with `static_fields`, they are read from it")
         if self.time_origins is not None and self.time_origin not in self.time_origins:
             raise ValueError(
                 f"{type(self).__name__} reads time measured from {list(self.time_origins)}, "
@@ -202,6 +208,7 @@ class LifeEventsDataModule(DataModule):
             notes_column=self.notes_column,
             birthdate_column=self.birthdate_column,
             notes_fields=self.notes_fields,
+            static_fields=self.static_fields,
             min_events=self.min_events,
             distinct_events=self.distinct_events,
             on_missing_birthdate=self.on_missing_birthdate,
@@ -222,6 +229,11 @@ class LifeEventsDataModule(DataModule):
             raise RuntimeError(f"{self.cache_dir} holds no prepared data. Call `prepare_data()` first.")
         self._store = SequenceStore.load(self.cache_dir, self.specials)
         self.vocab = self._store.vocab
+        if self._store.static_fields != tuple(self.static_fields):
+            raise ValueError(
+                f"{self.cache_dir} was built with static_fields={list(self._store.static_fields)}, "
+                f"got {self.static_fields}. Delete it to rebuild: `rm -rf {self.cache_dir}`"
+            )
 
         generator = torch.Generator().manual_seed(self.seed)
         order = torch.randperm(len(self._store), generator=generator).numpy()

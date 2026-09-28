@@ -17,6 +17,7 @@ from litgpt.life_events.delphi.data import (  # noqa: E402
     FIRST_EVENT_ID,
     NO_EVENT_ID,
     PAD_ID,
+    DelphiDataset,
     DelphiLifeEvents,
     delphi_collate_fn,
 )
@@ -243,3 +244,80 @@ def test_delphi_only_accepts_age(tmp_path, dataset):
 
 def test_delphi_min_time_defaults_to_birth(tmp_path, dataset):
     assert make_module(tmp_path, dataset).min_time == 0
+
+
+def _static_sample(data, person_id, **kwargs):
+    """Person `person_id`'s sample, from a fresh dataset over the whole store."""
+    store = data._store
+    kwargs.setdefault("no_event_mode", "none")
+    dataset = DelphiDataset(store, np.arange(len(store)), **kwargs)
+    return dataset[list(np.asarray(store.ids)).index(person_id)]
+
+
+def test_statics_open_every_sample_and_are_never_targets(tmp_path, static_dataset):
+    data = prepared(tmp_path, static_dataset, static_fields=["GENDER", "MIGRATION"], shuffle_statics=False)
+    vocab = data.vocab
+    sample = _static_sample(data, "a", max_seq_length=8)
+    assert vocab.decode(sample["input_ids"].tolist()) == ["GENDER=F", "MIGRATION=none", "birth", "study", "job"]
+    assert sample["age"][:3].tolist() == [0, 0, 0]
+    # The second static is ignored as a target; `birth` is predicted from the statics.
+    assert sample["labels"][0] == data.ignore_index
+    assert vocab.decode(sample["labels"][1:].tolist()) == ["birth", "study", "job", "move"]
+
+    batch = next(iter(data.train_dataloader()))
+    static = torch.isin(batch["input_ids"], torch.tensor(vocab.static_ids))
+    assert (static.sum(-1) == 2).all() and static[:, :2].all()
+    assert not torch.isin(batch["labels"], torch.tensor(vocab.static_ids)).any()
+    assert not batch["pad_mask"][:, 0].any()
+    # Real queries past the statics still attend to them.
+    assert batch["attn_mask"][:, 0, 2:, :2][batch["pad_mask"][:, 2:]].all()
+
+
+def test_statics_survive_windowing(tmp_path, static_dataset):
+    data = prepared(tmp_path, static_dataset, static_fields=["GENDER", "MIGRATION"], shuffle_statics=False)
+    vocab = data.vocab
+    right = _static_sample(data, "a", max_seq_length=4, select="right")
+    assert vocab.decode(right["input_ids"].tolist()) == ["GENDER=F", "MIGRATION=none", "study", "job"]
+    # The window skipped `birth`, so the wait from age 0 to `study` is not observed.
+    assert right["labels"][:2].tolist() == [data.ignore_index] * 2
+    assert vocab.decode(right["labels"][2:].tolist()) == ["job", "move"]
+
+    left = _static_sample(data, "a", max_seq_length=4, select="left")
+    assert vocab.decode(left["input_ids"].tolist()) == ["GENDER=F", "MIGRATION=none", "birth", "study"]
+    assert left["labels"][0] == data.ignore_index and left["labels"][1] != data.ignore_index
+
+    with pytest.raises(ValueError, match="leaves no room for events"):
+        _static_sample(data, "a", max_seq_length=2)
+
+
+def test_statics_are_shuffled_in_training_only(tmp_path, static_dataset):
+    data = prepared(tmp_path, static_dataset, static_fields=["GENDER", "MIGRATION"])
+    train = data.train_dataset
+    orders = set()
+    for epoch in range(20):
+        train.set_epoch(epoch)
+        orders.add(tuple(train[0]["input_ids"][:2].tolist()))
+    assert len(orders) == 2
+    assert not data.val_dataset.shuffle_statics
+
+
+def test_end_to_end_with_statics(tmp_path, static_dataset):
+    from litgpt.config import Config
+    from litgpt.life_events.delphi.model import Delphi
+    from litgpt.pretrain import _unpack_batch, forward_loss
+
+    data = prepared(tmp_path, static_dataset, no_event_mode="regular", static_fields=["GENDER", "MIGRATION"])
+    config = Config(
+        model_class_name="Delphi",
+        block_size=8,
+        vocab_size=data.vocab_size,
+        padded_vocab_size=data.vocab_size,
+        n_layer=1,
+        n_head=2,
+        n_embd=8,
+        rotary_percentage=0.0,
+    )
+    model = Delphi(config)
+    model.apply(model._init_weights)
+    losses = forward_loss(model, _unpack_batch(next(iter(data.train_dataloader())), model.max_seq_length))
+    assert all(torch.isfinite(value) for value in losses.values())

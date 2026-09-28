@@ -14,6 +14,7 @@ from litgpt.life_events.delphi.data import DAYS_PER_YEAR, NO_EVENT_TOKEN, Delphi
 from litgpt.life_events.delphi.model import Delphi
 from litgpt.utils import save_config
 
+from . import helpers
 from .helpers import BIRTHDATES, prepared, write_parquet, write_persons
 
 
@@ -138,3 +139,27 @@ def test_generate_needs_room_for_a_prompt(tmp_path, dataset):
     checkpoint_dir, _ = _checkpoint(tmp_path, dataset)
     with pytest.raises(ValueError, match="max_new_tokens"):
         generate(checkpoint_dir, out_path=tmp_path / "out.parquet", max_new_tokens=16)
+
+
+def test_generate_conditions_on_statics_but_never_samples_them(tmp_path, static_dataset):
+    pytest.importorskip("pyarrow")
+    checkpoint_dir, data = _checkpoint(
+        tmp_path, static_dataset, config_kwargs=dict(lm_head_bias=True), static_fields=["GENDER", "MIGRATION"]
+    )
+    # Make the statics by far the likeliest events, so only `ignore_tokens` keeps them out.
+    state = torch.load(checkpoint_dir / "lit_model.pth")
+    state["model"]["lm_head.weight"][data.vocab.static_ids] = 0.0
+    state["model"]["lm_head.bias"].zero_()[data.vocab.static_ids] = 50.0
+    torch.save(state, checkpoint_dir / "lit_model.pth")
+
+    out_path = tmp_path / "trajectories.parquet"
+    generate(checkpoint_dir, out_path=out_path, split="all", max_new_tokens=6)
+    statics = set(data.vocab.statics)
+    for (person, _), rows in _trajectories(out_path).items():
+        prompt = [(days, event) for days, event, generated in rows if not generated]
+        assert [event for _, event in prompt[:2]] == [
+            f"GENDER={helpers.STATICS['GENDER'][person] or '<unknown>'}",
+            f"MIGRATION={helpers.STATICS['MIGRATION'][person]}",
+        ]
+        assert all(days == 0 for days, _ in prompt[:2])
+        assert not statics & {event for _, event, generated in rows if generated}

@@ -3,7 +3,7 @@
 # Partially generated and refined with Claude Code (Opus 5).
 import pytest
 
-from .helpers import write_int_id_parquet, write_int_persons, write_parquet, write_persons
+from .helpers import STATICS, write_int_id_parquet, write_int_persons, write_parquet, write_persons
 
 
 @pytest.fixture()
@@ -30,6 +30,13 @@ def dataset(tmp_path):
         notes_sql="{'partner': 'x', 'weight': 2.0}",
     )
     return [str(events_a), str(events_b)], str(write_persons(tmp_path / "persons.parquet"))
+
+
+@pytest.fixture()
+def static_dataset(tmp_path, dataset):
+    """`dataset`, with a person table that also carries `GENDER` and `MIGRATION`."""
+    event_paths, _ = dataset
+    return event_paths, str(write_persons(tmp_path / "persons_static.parquet", statics=STATICS))
 
 
 @pytest.fixture()
