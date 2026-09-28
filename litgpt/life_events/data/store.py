@@ -61,8 +61,12 @@ class SequenceStore:
     vocab: EventVocab
 
     @classmethod
-    def load(cls, cache_dir: Path, specials: Sequence[str] | None = None) -> "SequenceStore":
-        """Opens a cache. `specials`, when given, must match those it was built with."""
+    def load(cls, cache_dir: Path, specials: Sequence[str] | None = None, mmap: bool = True) -> "SequenceStore":
+        """Opens a cache. `specials`, when given, must match those it was built with.
+
+        `mmap=False` reads the arrays into memory instead, which leaves no file open: on
+        Windows, a memory-mapped file cannot be deleted while the store is alive.
+        """
         cache_dir = Path(cache_dir)
         meta = json.loads((cache_dir / "meta.json").read_text())
         if meta.get("version") != CACHE_VERSION:
@@ -72,7 +76,7 @@ class SequenceStore:
             )
         # `mmap_mode`: registry-scale token streams never fully enter RAM, and forked
         # dataloader workers share the page cache instead of copying the arrays.
-        load = partial(np.load, mmap_mode="r", allow_pickle=False)
+        load = partial(np.load, mmap_mode="r" if mmap else None, allow_pickle=False)
         specs = {name: NoteField(**spec) for name, spec in meta["features"].items()}
         return cls(
             ids=load(cache_dir / "ids.npy"),

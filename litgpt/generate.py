@@ -291,7 +291,8 @@ def _encode_prompts(
     )
     # `build_event_cache` leaves the completion marker to its caller.
     (cache_dir / "meta.json").write_text(json.dumps(meta))
-    return SequenceStore.load(cache_dir, data.specials)
+    # Into memory: `cache_dir` is temporary, and Windows cannot delete it while it is mapped.
+    return SequenceStore.load(cache_dir, data.specials, mmap=False)
 
 
 def _build_prompt(
