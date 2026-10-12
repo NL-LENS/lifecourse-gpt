@@ -18,13 +18,19 @@ from litgpt.config import Config
 from litgpt.life_events.delphi.loss import chunked_cross_entropy_exp_waiting_time
 from litgpt.model import GPT
 
-__all__ = ["AgeEncoding", "Delphi"]
+__all__ = ["AGE_UNIT_DAYS", "AgeEncoding", "Delphi"]
+
+AGE_UNIT_DAYS = {"days": 1.0, "weeks": 7.0, "months": 365.25 / 12, "years": 365.25}
+"""Length in days of each unit `config.age_unit` can name."""
 
 
 # Adapted from https://github.com/gerstung-lab/Delphi/blob/main/model.py#L119 under the MIT License
 class AgeEncoding(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
+        if config.age_unit not in AGE_UNIT_DAYS:
+            raise ValueError(f"age_unit must be one of {list(AGE_UNIT_DAYS)}, got {config.age_unit!r}")
+        self.days_per_unit = AGE_UNIT_DAYS[config.age_unit]
         div_term = torch.exp(torch.arange(0, config.n_embd, 2) * (-math.log(config.age_base) / config.n_embd))
         self.register_buffer("div_term", div_term)
         self.n_embd = config.n_embd
@@ -40,7 +46,7 @@ class AgeEncoding(nn.Module):
         """
         B, T, _ = x.size()  # batch size, sequence length, 1
 
-        x = x / 365.25 * self.div_term  # Convert from days into years
+        x = x / self.days_per_unit * self.div_term  # Convert from days into `config.age_unit`
 
         y = torch.zeros(B, T, self.n_embd, device=x.device, dtype=x.dtype)
         y[..., 0::2] = torch.sin(x)

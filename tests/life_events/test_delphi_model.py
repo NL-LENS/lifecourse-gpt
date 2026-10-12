@@ -13,7 +13,7 @@ from litgpt.life_events.delphi.data import NO_EVENT_ID, PAD_AGE, PAD_ID
 from litgpt.life_events.delphi.generate import generate_trajectories
 from litgpt.life_events.delphi.loss import chunked_cross_entropy_exp_waiting_time
 from litgpt.life_events.delphi.mask import build_tie_mask, last_visible_index
-from litgpt.life_events.delphi.model import Delphi
+from litgpt.life_events.delphi.model import AgeEncoding, Delphi
 from litgpt.model import GPT, batched_index_select, model_class
 from litgpt.pretrain import _unpack_batch, forward_loss
 
@@ -77,6 +77,16 @@ def test_delphi_forward_uses_age():
     assert not torch.allclose(model(idx, age=young), model(idx, age=old))
     with pytest.raises(ValueError, match="equal shape"):
         model(idx, age=young[:, :2])
+
+
+def test_age_unit_rescales_the_age_encoding():
+    """An age in months encodes like twelve times that age in years."""
+    years, months = AgeEncoding(_config(age_unit="years")), AgeEncoding(_config(age_unit="months"))
+    months.linear.load_state_dict(years.linear.state_dict())
+    age = torch.tensor([[[0.0], [400.0], [9000.0]]])
+    torch.testing.assert_close(months(age), years(age * 12))
+    with pytest.raises(ValueError, match="age_unit"):
+        AgeEncoding(_config(age_unit="decades"))
 
 
 def test_tie_mask_hides_keys_at_the_target_age():

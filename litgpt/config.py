@@ -118,8 +118,14 @@ class Config:
     # Life-course (Delphi) models. Only read by `litgpt.life_events.delphi.model.Delphi`.
     # Age encoding: base of the geometric sequence of sinusoidal frequencies used
     # to encode a token's age. Analogous to `rope_base`, but the encoded quantity is
-    # a continuous age in years rather than an integer position.
+    # a continuous age in `age_unit` rather than an integer position.
     age_base: int = 10000
+    # Unit the age is measured in before it is encoded: "days", "weeks", "months" or
+    # "years". The fastest sinusoid has a period of 2*pi units and the slowest one of
+    # 2*pi*age_base units, so the unit sets the shortest cycle the encoding can resolve:
+    # about 6.3 years with "years", too slow for anything seasonal, and about 6.3 months
+    # with "months". Ages always arrive in days; only the encoding's scale changes.
+    age_unit: Literal["days", "weeks", "months", "years"] = "years"
     # Time-to-event loss: floor on the expected waiting time, in the same unit as `age`
     # (days). Caps the implied event rate at `1 / t_min`, so that tied or same-day events
     # cannot drive it to infinity. `0.0` disables it. See
@@ -305,6 +311,7 @@ configs = [
         norm_class_name="LayerNorm",
         mlp_class_name="GptNeoxMLP",
         intermediate_size=480,
+        age_unit="years",
         t_min=0.0,
         token_dropout=0.0,
     ),

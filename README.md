@@ -181,7 +181,7 @@ The cache gives every event an integer time coordinate in whole days, but *what 
 
 Without a person dataset the individuals are simply whoever appears in the events. `min_time` drops events before a given coordinate; it defaults to `0` for `birth` (dropping events dated before birth) and to `None` otherwise, where a negative number just means earlier than the reference date.
 
-A dataset should read `store.time_origin` rather than assume one because the numbers look the same on any axis. Delphi accepts only `birth`, because its `<no_event>` tokens are drawn over a 100-year lifetime and `AgeEncoding` converts days to years of age.
+A dataset should read `store.time_origin` rather than assume one because the numbers look the same on any axis. Delphi accepts only `birth`, because its `<no_event>` tokens are drawn over a 100-year lifetime and `AgeEncoding` encodes age since birth.
 
 **Models that need more than one axis** (say age *and* calendar time) do not need a second cache, and nothing is stored twice. Every origin is a date, so the axes differ by one constant per individual, which the cache keeps in `time_offsets`:
 

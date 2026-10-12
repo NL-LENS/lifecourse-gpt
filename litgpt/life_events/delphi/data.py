@@ -369,8 +369,8 @@ class DelphiLifeEvents(LifeEventsDataModule):
     shapes stable for `torch.compile`."""
 
     specials = SPECIALS
-    # The no-event tokens are drawn over a 100-year *lifetime*, and `AgeEncoding` divides
-    # by 365.25 to get an age in years. Both are meaningless on any other time axis.
+    # The no-event tokens are drawn over a 100-year *lifetime*, and `AgeEncoding` encodes
+    # an age. Both are meaningless on any other time axis.
     time_origins = (BIRTH_ORIGIN,)
     model_class_name = "Delphi"
 

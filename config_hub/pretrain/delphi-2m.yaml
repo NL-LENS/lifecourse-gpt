@@ -35,6 +35,9 @@ model_config:
   # No RoPE: the age encoding is meant to be the only ordering signal, so that the model
   # cannot fit an event's index in the sequence instead of the age it happened at.
   rotary_percentage: 0.0
+  # Unit ages are encoded in: days, weeks, months or years. The shortest cycle the age
+  # encoding can resolve is about 2*pi of these, so use months or finer for seasonality.
+  age_unit: years
   # Floor on the expected waiting time, in days. 0.0 disables it.
   t_min: 0.0
   # Dropout over whole event embeddings, applied before the age encoding is added.
