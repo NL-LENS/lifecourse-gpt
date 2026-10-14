@@ -22,7 +22,17 @@ Time-invariate person attributes are stored in a separate dataset (also in Parqu
 
 ## Quickstart
 
-First, to create dummy silver layer event datasets in the expected format, for trying out the pipeline end-to-end:
+From the repository root, install the project dependencies and activate the virtual
+environment. Include the `extra` dependencies for Parquet processing and training logging:
+
+```bash
+uv sync --extra extra
+source .venv/bin/activate
+```
+
+To also install the testing dependencies, use `uv sync --extra extra --extra test`.
+
+Next, create dummy silver layer event datasets in the expected format to try out the pipeline end-to-end:
 
 ```bash
 litgpt dummy_data --out_dir data/dummy_life_events
