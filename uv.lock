@@ -641,7 +641,6 @@ name = "litgpt"
 version = "0.5.13"
 source = { editable = "." }
 dependencies = [
-    { name = "duckdb" },
     { name = "jsonargparse", extra = ["signatures"] },
     { name = "lightning" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -667,7 +666,6 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", specifier = ">=1.5.5" },
     { name = "duckdb", marker = "extra == 'extra'", specifier = ">=1.0" },
     { name = "duckdb", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "jsonargparse", extras = ["signatures"], marker = "python_full_version >= '3.10'", specifier = ">=4.37,<=4.41" },
