@@ -5,9 +5,10 @@
 #   litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml
 # See README.md for the data format and for training on your own datasets.
 
-# Delphi's architecture, from `litgpt.config`. It is spelled out under ``model_config``
-# rather than named here because ``model_config`` replaces a named config wholesale, and
-# the vocabulary has to match the data (13 dummy event types plus <pad> and <no_event>).
+# Delphi's architecture, from `litgpt.config`, spelled out under ``model_config`` so it
+# can be changed: ``model_config`` replaces a named config wholesale. The vocabulary is
+# not set here; `litgpt pretrain` reads `vocab_size`, `padded_vocab_size` and
+# `target_vocab_size` from the data cache.
 model_name: delphi-2m
 
 model_config:
@@ -17,13 +18,6 @@ model_config:
   model_class_name: Delphi
   # Longest event sequence the model sees, no-event tokens included.
   block_size: 48
-  # Both equal to the data module's `vocab_size`. Padding entries are not free here:
-  # every unused entry still contributes exp(logit) to the total event rate.
-  vocab_size: 15
-  padded_vocab_size: 15
-  # Events that can occur, i.e. `vocab_size` minus the static tokens of `static_fields`.
-  # Unset means `vocab_size`, which is right when there are no static fields.
-  # target_vocab_size: 15
   n_layer: 12
   n_head: 12
   n_embd: 120

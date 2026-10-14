@@ -668,10 +668,6 @@ def summarize(meta: dict, cache_dir: Path) -> str:
         dropped.append(f"{stats['n_dropped_min_events']:,} individuals under min_events={filters['min_events']}")
     if dropped:
         lines.append("  dropped: " + ", ".join(dropped))
-    settings = f"`vocab_size={meta['vocab_size']}` and `padded_vocab_size={meta['vocab_size']}`"
     if meta["target_vocab_size"] != meta["vocab_size"]:
-        settings = f"`vocab_size={meta['vocab_size']}`, `padded_vocab_size={meta['vocab_size']}` and " + (
-            f"`target_vocab_size={meta['target_vocab_size']}`"
-        )
-    lines.append(f"  Set {settings} in the model config.")
+        lines.append(f"  target_vocab_size={meta['target_vocab_size']} (the vocabulary without the static tokens)")
     return "\n".join(lines)

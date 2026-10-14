@@ -150,11 +150,8 @@ def generate(out_dir: Path = Path("data/dummy_life_events"), n_persons: int = 20
 
     n_events = sum(len(r) for r in rows.values())
     labels = sorted({r[2] for records in rows.values() for r in records})
-    print(
-        f"{out_dir}: {n_persons:,} persons / {n_events:,} events / {len(labels)} event types\n"
-        f"  {', '.join(labels)}\n"
-        f"  vocab_size for the model config: {len(labels) + 2} (the events plus <pad> and <no_event>)"
-    )
+    print(f"{out_dir}: {n_persons:,} persons / {n_events:,} events / {len(labels)} event types")
+    print(f"  {', '.join(labels)}")
 
 
 if __name__ == "__main__":

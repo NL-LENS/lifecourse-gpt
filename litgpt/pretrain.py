@@ -5,7 +5,7 @@ import pprint
 import time
 import warnings
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -165,10 +165,6 @@ def setup(
 
     fabric.launch()
 
-    fabric.print(pprint.pformat(hparams))
-    if logger_name in ("tensorboard", "wandb", "mlflow"):
-        fabric.logger.log_hyperparams(hparams)
-
     main(
         fabric=fabric,
         devices=devices,
@@ -182,6 +178,8 @@ def setup(
         train=train,
         eval=eval,
         optimizer=optimizer,
+        hparams=hparams,
+        log_hparams=logger_name in ("tensorboard", "wandb", "mlflow"),
     )
 
 
@@ -198,6 +196,8 @@ def main(
     eval: EvalArgs,
     optimizer: str | dict,
     num_nodes: int = 1,
+    hparams: dict | None = None,
+    log_hparams: bool = False,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
 
@@ -205,6 +205,20 @@ def main(
         out_dir.mkdir(parents=True, exist_ok=True)
 
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
+
+    # Before the model is built: a data module that defines its own vocabulary only knows
+    # it once the dataset is prepared, and the model is sized from it.
+    data.connect(batch_size=train.micro_batch_size, max_seq_length=train.max_seq_length or config.block_size)
+    with fabric.rank_zero_first():
+        data.prepare_data()
+    config = configure_vocab(fabric, config, data)
+
+    if hparams is not None:
+        # Only now, so that what is logged is the config the model is built from.
+        hparams = {**hparams, "model_config": asdict(config)}
+        fabric.print(pprint.pformat(hparams))
+        if log_hparams:
+            fabric.logger.log_hyperparams(hparams)
 
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
@@ -236,7 +250,7 @@ def main(
     optimizer = instantiate_torch_optimizer(optimizer, model.parameters(), **extra_kwargs)
     optimizer = fabric.setup_optimizers(optimizer)
 
-    train_dataloader, val_dataloader = get_dataloaders(fabric, data, train, model.max_seq_length)
+    train_dataloader, val_dataloader = get_dataloaders(data)
     train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
     if initial_checkpoint_dir:
@@ -524,12 +538,32 @@ def validate(
     return val_losses
 
 
-def get_dataloaders(
-    fabric: L.Fabric, data: DataModule, train: TrainArgs, block_size: int
-) -> tuple[DataLoader, DataLoader]:
-    data.connect(batch_size=train.micro_batch_size, max_seq_length=block_size)
-    with fabric.rank_zero_first():
-        data.prepare_data()
+def configure_vocab(fabric: L.Fabric, config: Config, data: DataModule) -> Config:
+    """`config` with its vocabulary sized from `data`, if `data` defines its own vocabulary.
+
+    Data modules that build their vocabulary from the dataset expose `vocab_size`, and
+    optionally `target_vocab_size`, once `prepare_data()` has run. Those then replace the
+    model config's values, which cannot be kept in sync with the dataset by hand.
+    `padded_vocab_size` is set to `vocab_size`, so no embedding goes unused.
+    """
+    vocab_size = getattr(data, "vocab_size", None)
+    if vocab_size is None:
+        return config
+    sizes = {
+        "vocab_size": vocab_size,
+        "padded_vocab_size": vocab_size,
+        "target_vocab_size": getattr(data, "target_vocab_size", vocab_size),
+    }
+    changed = [
+        f"{name}={getattr(config, name)} -> {value}" for name, value in sizes.items() if getattr(config, name) != value
+    ]
+    if changed:
+        fabric.print(f"Vocabulary sized from {type(data).__name__}: {', '.join(changed)}")
+    return replace(config, **sizes)
+
+
+def get_dataloaders(data: DataModule) -> tuple[DataLoader, DataLoader]:
+    """Dataloaders over `data`, already connected and prepared."""
     data.setup()
     train_dataloader = data.train_dataloader()
     val_dataloader = data.val_dataloader()

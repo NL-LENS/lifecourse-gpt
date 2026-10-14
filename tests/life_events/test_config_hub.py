@@ -3,6 +3,7 @@
 # Partially generated and refined with Claude Code (Opus 5).
 """The shipped Delphi config must keep matching `litgpt.pretrain`'s signature."""
 
+import re
 from pathlib import Path
 from unittest import mock
 from unittest.mock import Mock
@@ -31,9 +32,6 @@ def test_config_parses_and_selects_delphi(tmp_path, monkeypatch):
     assert isinstance(captured["data"], DelphiLifeEvents)
     config = captured["config"]
     assert model_class(config).__name__ == "Delphi"
-    # The vocabulary has to cover the dummy data exactly: padding entries are not free
-    # under the competing-risks loss.
-    assert config.vocab_size == config.padded_vocab_size
     assert config.rotary_percentage == 0.0
 
 
@@ -45,9 +43,9 @@ def test_config_matches_the_architecture_it_names():
     from_yaml = yaml.safe_load(CONFIG.read_text())["model_config"]
     named = Config.from_name("delphi-2m")
     for field, value in from_yaml.items():
-        if field in ("vocab_size", "padded_vocab_size"):
-            continue  # deliberately the dummy data's vocabulary, not Delphi's 1270
         assert value == getattr(named, field), field
+    # Read from the data cache instead, so it can never disagree with the dataset.
+    assert not {"vocab_size", "padded_vocab_size", "target_vocab_size"} & from_yaml.keys()
 
 
 def test_prepare_data_only_builds_the_cache_without_training(tmp_path, dataset, monkeypatch):
@@ -83,3 +81,57 @@ def test_prepare_data_only_builds_the_cache_without_training(tmp_path, dataset, 
     assert (cache_dir / "vocab.json").is_file()
     # A preparation run has no business creating a run directory or a logger.
     assert not out_dir.exists()
+
+
+def test_pretrain_sizes_the_vocabulary_from_the_cache(tmp_path, static_dataset, monkeypatch, capsys):
+    """The model config's vocabulary is a placeholder: `main` builds the model from the cache's,
+    and logs that config rather than the one it was given."""
+    from dataclasses import asdict
+
+    import lightning as L
+
+    from litgpt.args import EvalArgs, TrainArgs
+
+    class Built(Exception):
+        pass
+
+    def stop(**kwargs):
+        raise Built(kwargs["state"]["model"].config)
+
+    monkeypatch.setattr(pretrain, "fit", stop)
+    event_paths, person_path = static_dataset
+    data = DelphiLifeEvents(
+        event_paths=event_paths,
+        person_path=person_path,
+        cache_dir=tmp_path / "cache",
+        static_fields=["GENDER", "MIGRATION"],
+        val_split_fraction=1 / 3,
+        num_workers=0,
+    )
+    config = Config.from_name("delphi-2m", block_size=8, n_layer=1, n_head=1, n_embd=4, intermediate_size=8)
+    with pytest.raises(Built) as built:
+        pretrain.main(
+            fabric=L.Fabric(accelerator="cpu", devices=1),
+            devices=1,
+            seed=0,
+            initial_checkpoint_dir=None,
+            resume=False,
+            config=config,
+            data=data,
+            out_dir=tmp_path / "out",
+            train=TrainArgs(global_batch_size=2, micro_batch_size=2, max_tokens=16, max_norm=1.0, compile=False),
+            eval=EvalArgs(),
+            optimizer="AdamW",
+            hparams={"model_config": asdict(config)},
+        )
+
+    model_config = built.value.args[0]
+    assert data.target_vocab_size < data.vocab_size < config.vocab_size
+    assert model_config.vocab_size == model_config.padded_vocab_size == data.vocab_size
+    assert model_config.target_vocab_size == data.target_vocab_size
+    logged = re.findall(r"'(\w*vocab_size)': (\d+)", capsys.readouterr().out)
+    assert dict(logged) == {
+        "vocab_size": str(data.vocab_size),
+        "padded_vocab_size": str(data.vocab_size),
+        "target_vocab_size": str(data.target_vocab_size),
+    }

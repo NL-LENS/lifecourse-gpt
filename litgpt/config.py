@@ -139,7 +139,7 @@ class Config:
     # the time-to-event process. Only their logits enter the total event rate, in the loss
     # and when sampling; the rest -- static person-level tokens, which the data module
     # places last, and any padding up to `padded_vocab_size` -- can be read but never occur.
-    # `None` means `vocab_size`. Set it to the data module's `target_vocab_size`.
+    # `None` means `vocab_size`. `litgpt.pretrain` sets it from a life-events data module.
     target_vocab_size: int | None = None
 
     def __post_init__(self):
@@ -292,9 +292,8 @@ def check_indicator_and_length(
 # Anything built on `AgeEncoding` should disable RoPE for the same reason. The model
 # itself lives in `litgpt.life_events.delphi`.
 #
-# `vocab_size` and `padded_vocab_size` are placeholders: set both to the real vocabulary
-# size, since unused entries still contribute `exp(logit)` to the total event rate in
-# `chunked_cross_entropy_exp_waiting_time`.
+# `vocab_size` and `padded_vocab_size` are placeholders: `litgpt.pretrain` replaces both
+# with the vocabulary size of the life-events data module it trains on.
 configs = [
     dict(
         name="delphi-2m",
