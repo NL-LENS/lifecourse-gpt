@@ -1,9 +1,11 @@
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
+import litgpt.pretrain as pretrain
 from litgpt.__main__ import main
 
 
@@ -13,28 +15,10 @@ def test_cli():
         main()
     out = out.getvalue()
     assert "usage: litgpt" in out
-    assert (
-        "{download,chat,finetune,finetune_lora,finetune_full,finetune_adapter,finetune_adapter_v2,"
-        "pretrain,generate,generate_full,generate_adapter,generate_adapter_v2,generate_sequentially,"
-        "generate_speculatively,generate_tp,convert_to_litgpt,convert_from_litgpt,convert_pretrained_checkpoint,"
-        "merge_lora,evaluate,serve,validate}" in out
-    )
+    assert "{pretrain,dummy_data,generate}" in out
     assert (
         """Available subcommands:
-    download            Download weights or tokenizer data from the Hugging
-                        Face Hub.
-    chat                Chat with a model."""
-        in out
-    )
-    assert """evaluate            Evaluate a model with the LM Evaluation Harness.""" in out
-    assert """serve               Serve a LitGPT model using LitServe.""" in out
-    out = StringIO()
-    with pytest.raises(SystemExit), redirect_stdout(out), mock.patch("sys.argv", ["litgpt", "finetune_lora", "-h"]):
-        main()
-    out = out.getvalue()
-    assert (
-        """--lora_alpha LORA_ALPHA
-                        The LoRA alpha. (type: int, default: 16)"""
+    pretrain            Pretrain a model."""
         in out
     )
 
@@ -42,7 +26,6 @@ def test_cli():
     with pytest.raises(SystemExit), redirect_stdout(out), mock.patch("sys.argv", ["litgpt", "pretrain", "-h"]):
         main()
     out = out.getvalue()
-    print(out)
     assert (
         """--train.max_tokens MAX_TOKENS
                         Total number of tokens to train on (type: int | None,
@@ -51,30 +34,26 @@ def test_cli():
     )
 
 
-def test_pretrain_allows_max_steps():
+def test_pretrain_allows_max_steps(tmp_path):
     # Ensure --train.max_steps is accepted by the CLI for pretrain
     # and only emits a warning instead of raising a validation error.
     args = [
         "litgpt",
         "pretrain",
-        "pythia-14m",
+        "--config",
+        str(Path(__file__).parent.parent / "config_hub" / "pretrain" / "delphi-2m.yaml"),
         "--train.max_steps=1",
-        "--out_dir=out/test-cli",
+        f"--out_dir={tmp_path}",
+        "--logger_name=csv",
+        "--devices=1",
     ]
 
-    with pytest.warns(UserWarning, match="max_steps"):
-        try:
-            with mock.patch("sys.argv", args):
-                main()
-        except Exception:
-            pass
+    def validate_only(**kwargs):
+        pretrain.validate_args(kwargs["train"], kwargs["eval"], kwargs["initial_checkpoint_dir"], kwargs["resume"])
 
-
-def test_rewrite_finetune_command():
-    out1 = StringIO()
-    with pytest.raises(SystemExit), redirect_stdout(out1), mock.patch("sys.argv", ["litgpt", "fineune", "-h"]):
+    with (
+        pytest.warns(UserWarning, match="max_steps"),
+        mock.patch("sys.argv", args),
+        mock.patch.object(pretrain, "main", side_effect=validate_only),
+    ):
         main()
-    out2 = StringIO()
-    with pytest.raises(SystemExit), redirect_stdout(out2), mock.patch("sys.argv", ["litgpt", "fineune_lora", "-h"]):
-        main()
-    assert out1.getvalue() == out2.getvalue()

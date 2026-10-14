@@ -1,4 +1,4 @@
-# Contributing to LitGPT
+# Contributing to lifecourse-gpt
 
 We welcome all contributions, regardless of your level of experience or hardware. Whether it's a bug fix, a new feature, or an improvement to the docs — we appreciate your help!
 
@@ -12,8 +12,8 @@ We welcome all contributions, regardless of your level of experience or hardware
 ## Development setup
 
 ```bash
-git clone https://github.com/<your-username>/litgpt
-cd litgpt
+git clone https://github.com/<your-username>/lifecourse-gpt
+cd lifecourse-gpt
 ```
 
 ```bash
@@ -21,7 +21,7 @@ cd litgpt
 uv sync --all-extras
 
 # using pip
-pip install -e ".[extra,compiler,test]"
+pip install -e ".[extra,test]"
 ```
 
 Install pre-commit hooks to catch style issues before pushing:
@@ -52,6 +52,7 @@ pytest tests/
 
 ## Community
 
-- [Request a feature or report a bug](https://github.com/Lightning-AI/litgpt/issues)
-- [Contribution tutorial](https://lightning.ai/pages/community/tutorial/how-to-contribute-to-litgpt/)
-- [Join our Discord](https://discord.gg/VptPCZkGNa)
+- [Request a feature or report a bug](https://github.com/NL-LENS/lifecourse-gpt/issues)
+
+This project is a fork of [Lightning-AI/litgpt](https://github.com/Lightning-AI/litgpt);
+issues in the shared transformer code may be worth reporting upstream too.

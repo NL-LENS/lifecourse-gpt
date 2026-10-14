@@ -1,734 +1,244 @@
-<div align="center">
+# Life event sequence modelling
 
+This repository is a fork from [Lightning-AI/litgpt](https://github.com/Lightning-AI/litgpt) that adds GPT-style
+sequence models for life-course event data.
 
-# ⚡ LitGPT
+## Input data
 
-**20+ high-performance LLMs with recipes to pretrain, finetune, and deploy at scale.**
+The input data for training the model comes from a "silver" data layer (Databricks terminology; see https://github.com/NL-LENS/data-pipeline).
+The life events will come from different life event dataset files in Parquet format. The schema of these datasets will always be the same:
 
-<pre>
-✅ From scratch implementations      ✅ No abstractions         ✅ Beginner friendly
-   ✅ Flash attention                   ✅ FSDP                    ✅ LoRA, QLoRA, Adapter
-✅ Reduce GPU memory (fp4/8/16/32)   ✅ 1-1000+ GPUs/TPUs       ✅ 20+ LLMs         
-</pre>
-
-
----
-
-
-![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pytorch-lightning)
-![cpu-tests](https://github.com/Lightning-AI/litgpt/actions/workflows/cpu-tests.yml/badge.svg) [![license](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/Lightning-AI/litgpt/blob/main/LICENSE.md) [![Discord](https://img.shields.io/discord/1077906959069626439)](https://discord.gg/VptPCZkGNa)
-
-<p align="center">
-  <a href="#quick-start">Quick start</a> •
-  <a href="#choose-from-20-llms">Models</a> •
-  <a href="#finetune-an-llm">Finetune</a> •
-  <a href="#deploy-an-llm">Deploy</a> •
-  <a href="#all-workflows">All workflows</a> •
-  <a href="#state-of-the-art-features">Features</a> •
-  <a href="#training-recipes">Recipes (YAML)</a> •
-  <a href="https://lightning.ai/">Lightning AI</a> •
-    <a href="#tutorials">Tutorials</a>
-</p>
-
-&nbsp;
-
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-quick-start">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/get-started-badge.svg" height="36px" alt="Get started"/>
-</a>
-
-&nbsp;
-
-</div>
-
-# Looking for GPUs?
-Over 340,000 developers use [Lightning Cloud](https://lightning.ai/?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme) - purpose-built for PyTorch and PyTorch Lightning. 
-- [GPUs](https://lightning.ai/pricing?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme) from $0.19.   
-- [Clusters](https://lightning.ai/clusters?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme): frontier-grade training/inference clusters.   
-- [AI Studio (vibe train)](https://lightning.ai/studios?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme): workspaces where AI helps you debug, tune and vibe train.
-- [AI Studio (vibe deploy)](https://lightning.ai/studios?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme): workspaces where AI helps you optimize, and deploy models.     
-- [Notebooks](https://lightning.ai/notebooks?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme): Persistent GPU workspaces where AI helps you code and analyze.
-- [Inference](https://lightning.ai/deploy?utm_source=litgpt_readme&utm_medium=referral&utm_campaign=litgpt_readme): Deploy models as inference APIs.
-
-# Finetune, pretrain, and inference LLMs Lightning fast ⚡⚡
-Every LLM is implemented from scratch with **no abstractions** and **full control**, making them blazing fast, minimal, and performant at enterprise scale.
-
-✅ **Enterprise ready -** Apache 2.0 for unlimited enterprise use.</br>
-✅ **Developer friendly -** Easy debugging with no abstraction layers and single file implementations.</br>
-✅ **Optimized performance -** Models designed to maximize performance, reduce costs, and speed up training.</br>
-✅ **Proven recipes -** Highly-optimized training/finetuning recipes tested at enterprise scale.</br>
-
-&nbsp;
-
-# Quick start
-Install LitGPT
 ```
-pip install 'litgpt[extra]'
+ID | TIME       | EVENT       | NOTES
+------------------------------------------------
+0  | 2026-01-01 | EVENT_LABEL | {str: Any} 
+1  | 2026-01-01 | EVENT_LABEL | {str: Any} 
+.. | ...        | ...         | ... 
 ```
 
-Load and use any of the [20+ LLMs](#choose-from-20-llms):
+The `ID` column corresponds to the ID of a person to which the sequence belongs. The `TIME` column contains the event time stamp in ISO data format standard (daily resolution). The `EVENT` column contains the labels of the different events. The `NOTES` column contains event attributes (ignored for now).
+
+Time-invariate person attributes are stored in a separate dataset (also in Parquet format).
+
+## Quickstart
+
+From the repository root, install the project dependencies and activate the virtual
+environment. Include the `extra` dependencies for Parquet processing and training logging:
+
+```bash
+uv sync --extra extra
+source .venv/bin/activate
+```
+
+To also install the testing dependencies, use `uv sync --extra extra --extra test`.
+
+Next, create dummy silver layer event datasets in the expected format to try out the pipeline end-to-end:
+
+```bash
+litgpt dummy_data --out_dir data/dummy_life_events
+```
+
+It writes two event datasets with deliberately different `NOTES` schemas
+(`work_education.parquet`, `civil_registry.parquet`) and a `persons.parquet` with
+`BIRTHDATE`. By default, they contain 2000 invented people, ~27k events, 13 event types. You can pass `--n_persons` to create
+larger datasets. It is made up, so nothing trained on it means anything.
+
+Then pretrain Delphi on it:
+
+```bash
+litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml
+```
+
+The first run preprocesses the Parquet files into `data/dummy_life_events/cache` and
+prints what it kept. Later runs reuse that cache, so the cache should be deleted after changing
+the source data. Training reports `loss` as the sum of `loss_ce` (which event) and
+`loss_dt` (time difference between events), and writes checkpoints to `out/pretrain/delphi-2m`.
+
+To only build the cache, without training, add `--prepare_data_only`:
+
+```bash
+litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml --prepare_data_only true
+```
+
+It reads the data settings from the same config, prints the summary and exits before any
+model, logger, run directory or device is touched. This can run anywhere, including on a
+machine with no GPU. The training run afterwards finds the cache and skips the rebuild.
+Preparation is worth separating when it is slow, when it belongs on a different machine
+than training, or when several runs should share one cache.
+
+To train on real data, `data.init_args.event_paths` and `person_path` should point to 
+Parquet files (a directory or a glob works too). The model's `vocab_size`, `padded_vocab_size`
+and `target_vocab_size` are read from the cache, so they never need to be set in the config.
+
+Static person-level attributes such as gender or migration background are columns of the
+person dataset, named in `data.init_args.static_fields` (e.g. `--data.init_args.static_fields '[GENDER]'`).
+Each value becomes a token `GENDER=F`, and a missing value becomes `GENDER=<unknown>`. These tokens
+come last in the vocabulary, so they count towards `vocab_size`. As in Delphi, they open every
+sequence at age 0 and are only read by the model: they survive windowing, are never prediction
+targets and are shuffled in training (`shuffle_statics`). The model's `target_vocab_size` is the
+vocabulary without the static tokens: only those logits count as event rates, in the loss and when
+sampling, so static tokens never add to the total event rate and `litgpt generate` never samples them.
+
+To sample trajectories from a trained checkpoint:
+
+```bash
+litgpt generate out/pretrain/delphi-2m/final --cutoff_age 50 --num_samples 10 --termination_events '[death]'
+```
+
+It conditions each held-out person (`--split val`, the default) on what they experienced
+up to age 50 and simulates the rest of their life course. The model, the vocabulary and
+the persons all come from the checkpoint directory and the cache its config points at.
+To simulate other people, pass their silver-layer datasets as `--prompt_paths '[...]'`
+and `--prompt_person_path`, which get encoded with the checkpoint's vocabulary. The result,
+`out/generate/trajectories.parquet` by default, has the silver-layer columns
+`ID | TIME | EVENT`, plus `SAMPLE` and `GENERATED` (prompt or sampled). `<no_event>` rows
+are kept, so filter them out before feeding the file back into the data pipeline.
+`litgpt generate --help` lists all options.
+
+Or, from Python:
+
 ```python
-from litgpt import LLM
+import torch
+from litgpt import Config
+from litgpt.life_events.data import EventVocab
+from litgpt.life_events.delphi import generate_trajectories
+from litgpt.life_events.delphi.data import SPECIALS
+from litgpt.model import model_class
 
-llm = LLM.load("microsoft/phi-2")
-text = llm.generate("Fix the spelling: Every fall, the family goes to the mountains.")
-print(text)
-# Corrected Sentence: Every fall, the family goes to the mountains.
-```
+out = "out/pretrain/delphi-2m/final"
+config = Config.from_file(f"{out}/model_config.yaml")
+model = model_class(config)(config)  # -> Delphi, per `model_class_name`
+model.load_state_dict(torch.load(f"{out}/lit_model.pth", weights_only=False)["model"])
 
-&nbsp;
-
-✅ Optimized for fast inference</br>
-✅ Quantization</br>
-✅ Runs on low-memory GPUs</br>
-✅ No layers of internal abstractions</br>
-✅ Optimized for production scale</br>
-
-<details>
-  <summary>Advanced install options</summary>
-
-Install from source:
-
-```bash
-git clone https://github.com/Lightning-AI/litgpt
-cd litgpt
-# if using uv
-uv sync --all-extras
-# if using pip
-pip install -e ".[extra,compiler,test]"
-```
-</details>
-
-[Explore the full Python API docs](tutorials/python-api.md).
-
-&nbsp;
-
----
-# Choose from 20+ LLMs
-Every model is written from scratch to maximize performance and remove layers of abstraction:
-
-| Model | Model size | Author | Reference |
-|----|----|----|----|
-| Llama 3, 3.1, 3.2, 3.3 | 1B, 3B, 8B, 70B, 405B | Meta AI | [Meta AI 2024](https://github.com/meta-llama/llama3)                                           |
-| Code Llama | 7B, 13B, 34B, 70B | Meta AI | [Rozière et al. 2023](https://arxiv.org/abs/2308.12950)                                       |
-| CodeGemma | 7B | Google | [Google Team, Google Deepmind](https://ai.google.dev/gemma/docs/codegemma)                                     |
-| Gemma 2 | 2B, 9B, 27B | Google | [Google Team, Google Deepmind](https://storage.googleapis.com/deepmind-media/gemma/gemma-2-report.pdf)  |
-| Phi 4 | 14B | Microsoft Research | [Abdin et al. 2024](https://arxiv.org/abs/2412.08905)                                                                            |
-| Qwen2.5 | 0.5B, 1.5B, 3B, 7B, 14B, 32B, 72B | Alibaba Group | [Qwen Team 2024](https://qwenlm.github.io/blog/qwen2.5/)                                               |
-| Qwen2.5 Coder | 0.5B, 1.5B, 3B, 7B, 14B, 32B | Alibaba Group | [Hui, Binyuan et al. 2024](https://arxiv.org/abs/2409.12186)                                          |
-| R1 Distill Llama | 8B, 70B | DeepSeek AI | [DeepSeek AI 2025](https://github.com/deepseek-ai/DeepSeek-R1/blob/main/DeepSeek_R1.pdf)                                                                                 |
-| ... | ... | ... | ...   |
-
-<details>
-  <summary>See full list of 20+ LLMs</summary>
-
-&nbsp;
-
-#### All models
-
-| Model | Model size | Author | Reference |
-|----|----|----|----|
-| CodeGemma | 7B | Google | [Google Team, Google Deepmind](https://ai.google.dev/gemma/docs/codegemma)                                                                 |
-| Code Llama | 7B, 13B, 34B, 70B | Meta AI | [Rozière et al. 2023](https://arxiv.org/abs/2308.12950)                                                                   |
-| Falcon | 7B, 40B, 180B | TII UAE | [TII 2023](https://falconllm.tii.ae)                                                                                              |
-| Falcon 3 | 1B, 3B, 7B, 10B | TII UAE | [TII 2024](https://huggingface.co/blog/falcon3)                                                                                              |
-| FreeWilly2 (Stable Beluga 2) | 70B | Stability AI | [Stability AI 2023](https://stability.ai/blog/stable-beluga-large-instruction-fine-tuned-models)                 |
-| Function Calling Llama 2 | 7B | Trelis | [Trelis et al. 2023](https://huggingface.co/Trelis/Llama-2-7b-chat-hf-function-calling-v2)                                  |
-| Gemma | 2B, 7B | Google | [Google Team, Google Deepmind](https://storage.googleapis.com/deepmind-media/gemma/gemma-report.pdf)                                       |
-| Gemma 2 | 9B, 27B | Google | [Google Team, Google Deepmind](https://storage.googleapis.com/deepmind-media/gemma/gemma-2-report.pdf)                                  |
-| Gemma 3 | 1B, 4B, 12B, 27B | Google | [Google Team, Google Deepmind](https://arxiv.org/pdf/2503.19786)                                  |
-| Llama 2 | 7B, 13B, 70B | Meta AI | [Touvron et al. 2023](https://arxiv.org/abs/2307.09288)                                                                           |
-| Llama 3.1 | 8B, 70B | Meta AI | [Meta AI 2024](https://github.com/meta-llama/llama3)                                                                                 |
-| Llama 3.2 | 1B, 3B | Meta AI | [Meta AI 2024](https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/)                                           |
-| Llama 3.3 | 70B | Meta AI | [Meta AI 2024](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)                                                                                 |
-| Mathstral | 7B | Mistral AI | [Mistral AI 2024](https://mistral.ai/news/mathstral/)                                                                                  |
-| MicroLlama | 300M | Ken Wang | [MicroLlama repo](https://github.com/keeeeenw/MicroLlama)                                                                             |
-| Mixtral MoE | 8x7B | Mistral AI | [Mistral AI 2023](https://mistral.ai/news/mixtral-of-experts/)                                                                     |
-| Mistral | 7B, 123B | Mistral AI | [Mistral AI 2023](https://mistral.ai/news/announcing-mistral-7b/)                                                                  |
-| Mixtral MoE | 8x22B | Mistral AI | [Mistral AI 2024](https://mistral.ai/news/mixtral-8x22b/)                                                                         |
-| OLMo | 1B, 7B | Allen Institute for AI (AI2) | [Groeneveld et al. 2024](https://aclanthology.org/2024.acl-long.841/)    |
-| OpenLLaMA | 3B, 7B, 13B | OpenLM Research | [Geng & Liu 2023](https://github.com/openlm-research/open_llama)                                                         |
-| Phi 1.5 & 2 | 1.3B, 2.7B | Microsoft Research  | [Li et al. 2023](https://arxiv.org/abs/2309.05463)                                                                  |
-| Phi 3 | 3.8B | Microsoft Research | [Abdin et al. 2024](https://arxiv.org/abs/2404.14219)                                                                            |
-| Phi 4 | 14B | Microsoft Research | [Abdin et al. 2024](https://arxiv.org/abs/2412.08905)                                                                            |
-| Phi 4 Mini Instruct | 3.8B | Microsoft Research | [Microsoft 2025](https://arxiv.org/abs/2503.01743)                                           |
-| Phi 4 Mini Reasoning | 3.8B | Microsoft Research | [Xu, Peng et al. 2025](https://arxiv.org/abs/2504.21233)                                           |
-| Phi 4 Reasoning | 3.8B | Microsoft Research | [Abdin et al. 2025](https://arxiv.org/abs/2504.21318)                                           |
-| Phi 4 Reasoning Plus | 3.8B | Microsoft Research | [Abdin et al. 2025](https://arxiv.org/abs/2504.21318)                                           |
-| Platypus | 7B, 13B, 70B |  Lee et al. | [Lee, Hunter, and Ruiz 2023](https://arxiv.org/abs/2308.07317)                                                               |
-| Pythia | {14,31,70,160,410}M, {1,1.4,2.8,6.9,12}B | EleutherAI | [Biderman et al. 2023](https://arxiv.org/abs/2304.01373)                                            |
-| Qwen2.5 | 0.5B, 1.5B, 3B, 7B, 14B, 32B, 72B | Alibaba Group | [Qwen Team 2024](https://qwenlm.github.io/blog/qwen2.5/)                                               |
-| Qwen2.5 Coder | 0.5B, 1.5B, 3B, 7B, 14B, 32B | Alibaba Group | [Hui, Binyuan et al. 2024](https://arxiv.org/abs/2409.12186)                                          |
-| Qwen2.5 1M (Long Context) | 7B, 14B | Alibaba Group | [Qwen Team 2025](https://qwenlm.github.io/blog/qwen2.5-1m/)                                          |
-| Qwen2.5 Math | 1.5B, 7B, 72B | Alibaba Group | [An, Yang et al. 2024](https://arxiv.org/abs/2409.12122)                                          |
-| QwQ | 32B | Alibaba Group | [Qwen Team 2025](https://qwenlm.github.io/blog/qwq-32b/)                                                                         |
-| QwQ-Preview | 32B | Alibaba Group | [Qwen Team 2024](https://qwenlm.github.io/blog/qwq-32b-preview/)                                                                         |
-| Qwen3 | 0.6B, 1.7B, 4B{Hybrid, Thinking-2507, Instruct-2507}, 8B, 14B, 32B | Alibaba Group | [Qwen Team 2025](https://arxiv.org/abs/2505.09388/)                                                                         |
-| Qwen3 MoE | 30B{Hybrid, Thinking-2507, Instruct-2507}, 235B{Hybrid, Thinking-2507, Instruct-2507} | Alibaba Group | [Qwen Team 2025](https://arxiv.org/abs/2505.09388/)                                                                         |
-| R1 Distill Llama | 8B, 70B | DeepSeek AI | [DeepSeek AI 2025](https://github.com/deepseek-ai/DeepSeek-R1/blob/main/DeepSeek_R1.pdf)                                                                                 |
-| SmolLM2 | 135M, 360M, 1.7B | Hugging Face | [Hugging Face 2024](https://github.com/huggingface/smollm)                                                               |
-| Salamandra | 2B, 7B | Barcelona Supercomputing Centre | [BSC-LTC 2024](https://github.com/BSC-LTC/salamandra)                                                                         |
-| StableCode | 3B | Stability AI | [Stability AI 2023](https://stability.ai/blog/stablecode-llm-generative-ai-coding)                                                  |
-| StableLM  | 3B, 7B | Stability AI | [Stability AI 2023](https://github.com/Stability-AI/StableLM)                                                                    |
-| StableLM Zephyr | 3B | Stability AI | [Stability AI 2023](https://stability.ai/blog/stablecode-llm-generative-ai-coding)                                             |
-| TinyLlama | 1.1B | Zhang et al. | [Zhang et al. 2023](https://github.com/jzhang38/TinyLlama)                                                                         |
-
-
-**Tip**: You can list all available models by running the `litgpt download list` command.
-
-
-</details>
-
-&nbsp;
-
----
-
-# Workflows
-
-<p align="center">
-  <a href="#finetune-an-llm">Finetune</a> •
-  <a href="#pretrain-an-llm">Pretrain</a> •
-  <a href="#continue-pretraining-an-llm">Continued pretraining</a> •
-    <a href="#evaluate-an-llm">Evaluate</a> •
-    <a href="#deploy-an-llm">Deploy</a> •
-    <a href="#test-an-llm">Test</a>
-</p>
-
-&nbsp;
-
-Use the command line interface to run advanced workflows such as pretraining or finetuning on your own data.
-
-
-## All workflows
-After installing LitGPT, select the model and workflow to run (finetune, pretrain, evaluate, deploy, etc...):
-
-```bash
-# litgpt [action] [model]
-litgpt  serve     meta-llama/Llama-3.2-3B-Instruct
-litgpt  finetune  meta-llama/Llama-3.2-3B-Instruct
-litgpt  pretrain  meta-llama/Llama-3.2-3B-Instruct
-litgpt  chat      meta-llama/Llama-3.2-3B-Instruct
-litgpt  evaluate  meta-llama/Llama-3.2-3B-Instruct
-```
-
-&nbsp;
-
-----
-
-## Finetune an LLM
-
-<div align="center">
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-finetune">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/run-on-studio.svg" height="36px" alt="Run on Studios"/>
-</a>
-</div>
-
-&nbsp;
-
-Finetuning is the process of taking a pretrained AI model and further training it on a smaller, specialized dataset tailored to a specific task or application.
-
-
-&nbsp;
-
-```bash
-# 0) setup your dataset
-curl -L https://huggingface.co/datasets/ksaw008/finance_alpaca/resolve/main/finance_alpaca.json -o my_custom_dataset.json
-
-# 1) Finetune a model (auto downloads weights)
-litgpt finetune microsoft/phi-2 \
-  --data JSON \
-  --data.json_path my_custom_dataset.json \
-  --data.val_split_fraction 0.1 \
-  --out_dir out/custom-model
-
-# 2) Test the model
-litgpt chat out/custom-model/final
-
-# 3) Deploy the model
-litgpt serve out/custom-model/final
-```
-
-[Read the full finetuning docs](tutorials/finetune.md)
-
-&nbsp;
-
-----
-
-## Deploy an LLM
-
-<div align="center">
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-serve">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/deploy-on-studios.svg" height="36px" alt="Deploy on Studios"/>
-</a>
-</div>
-
-&nbsp;
-
-Deploy a pretrained or finetune LLM to use it in real-world applications. Deploy, automatically sets up a web server that can be accessed by a website or app.
-
-```bash
-# deploy an out-of-the-box LLM
-litgpt serve microsoft/phi-2
-
-# deploy your own trained model
-litgpt serve path/to/microsoft/phi-2/checkpoint
-```
-
-<details>
-  <summary>Show code to query server:</summary>
-
-&nbsp;
-
-Test the server in a separate terminal and integrate the model API into your AI product:
-```python
-# 3) Use the server (in a separate Python session)
-import requests, json
-response = requests.post(
-    "http://127.0.0.1:8000/predict",
-    json={"prompt": "Fix typos in the following sentence: Example input"}
+# The cache holds the vocabulary the checkpoint was trained with.
+vocab = EventVocab.load("data/dummy_life_events/cache/vocab.json", SPECIALS)
+idx = torch.tensor([vocab.encode(["birth", "school_start"])])
+age = torch.tensor([[0, 2200]])  # in days, as the model was trained
+events, ages = generate_trajectories(
+    model, idx, age, max_new_tokens=10, termination_tokens=vocab.encode(["death"]),
+    # `<no_event>` is a real outcome the model was trained on, so it gets sampled too.
+    # Add it here to draw only actual events: ignore_tokens=(vocab.pad_id, 1).
 )
-print(response.json()["output"])
+for event, days in zip(vocab.decode(events[0].tolist()), ages[0].tolist()):
+    print(f"{days / 365.25:6.1f} years  {event}")
 ```
-</details>
 
-[Read the full deploy docs](tutorials/deploy.md).
+## Code layout
 
-&nbsp;
+All life-event related code lives in `litgpt/life_events/`. The module is split into a model-agnostic data layer and one package per architecture:
 
-----
+```
+litgpt/life_events/
+  data/                  # knows nothing about any model
+    source.py            # silver layer -> cache (DuckDB): merge, time axis, filters, NOTES fields
+    store.py             # SequenceStore: memory-mapped tokens, times and note features per individual
+    vocab.py             # EventVocab with architecture-defined special tokens
+    datamodule.py        # LifeEventsDataModule: prepare_data / split by individual / dataloaders
+  delphi/                # everything specific to Delphi
+    data.py              # DelphiLifeEvents: <no_event> insertion, windowing, shift, tie-mask collate
+    model.py             # Delphi(GPT): age encoding + token dropout
+    mask.py              # build_tie_mask, last_visible_index
+    loss.py              # competing-risks likelihood (loss_ce + loss_dt)
+    generate.py          # generate_trajectories
+```
 
-## Evaluate an LLM
-Evaluate an LLM to test its performance on various tasks to see how well it understands and generates text. Simply put, we can evaluate things like how well would it do in college-level chemistry, coding, etc... (MMLU, Truthful QA, etc...)
+`litgpt/generate.py` wires `generate_trajectories` into the `litgpt generate` command.
+
+Training: `litgpt pretrain delphi-2m --data DelphiLifeEvents --data.event_paths '[...]' --data.person_path ...`. The `delphi-2m` config sets `model_class_name: Delphi`, which is how `litgpt.pretrain` picks the model class and its loss. Note that `--model_config.*` replaces the named config entirely, so when using it also pass `--model_config.model_class_name Delphi`. `pretrain` refuses to pair `DelphiLifeEvents` with any other model class.
+
+### Adding an architecture
+
+1. Subclass `litgpt.model.GPT`. Override `embed(idx, **inputs)` to change the input embedding, and the static methods `model_inputs(batch)`, `compute_loss(logits, batch, config)` and `example_batch(...)` to define what the model reads from a batch and which loss it trains under.
+2. Register it in `litgpt.model._MODEL_CLASSES`, or set `model_class_name` to its dotted import path.
+3. Subclass `LifeEventsDataModule`: set `specials` (reserved tokens, padding first) and implement `make_dataset(store, indices, train)` and `collate_fn()`. Batches are dicts of `(B, T)` tensors (and `(B, 1, T, T)` masks). They must already be shifted, with the targets under `labels`.
+4. If the model only works on one time axis, restrict `time_origins` (Delphi sets `("birth",)`); the base class rejects any other.
+
+### Data module options
+
+Every field of the data module is settable from the CLI as `--data.<field>` or under
+`data.init_args` in a YAML config. `litgpt pretrain --data DelphiLifeEvents --print_config`
+lists them all with their defaults (`--data.help DelphiLifeEvents` shows descriptions, but
+only for the fields a subclass declares itself, not the inherited ones).
+
+When the event datasets exceed the available memory resources, settings that control DuckDB, which does the
+merging, joining and sorting in `prepare_data`, can be tuned as follows:
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `duckdb_threads` | all cores | Threads for the cache build. Lower it to leave room for other work. |
+| `duckdb_memory_limit` | ~80% of RAM | e.g. `8GB`. **Should be paired it with a temp directory**. |
+| `duckdb_temp_directory` | none | Where DuckDB spills to disk, which is what lets the sort and the join exceed the memory limit. |
+
+For example:
 
 ```bash
-litgpt evaluate microsoft/phi-2 --tasks 'truthfulqa_mc2,mmlu'
+litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml --prepare_data_only true \
+  --data.duckdb_threads 8 --data.duckdb_memory_limit 8GB --data.duckdb_temp_directory /scratch/duckdb
 ```
 
-[Read the full evaluation docs](tutorials/evaluation.md).
+These can also be set with environment variables.
 
-&nbsp;
+### The time axis
 
-----
+The cache gives every event an integer time coordinate in whole days, but *what it is measured from* differs between model architectures, set by `time_origin`:
 
-##  Test an LLM
+| `time_origin` | `store.times` holds | needs `person_path` |
+| --- | --- | --- |
+| `birth` (default) | age in days | yes, for `BIRTHDATE` |
+| `epoch` | days since 1970-01-01 | no |
+| an ISO date, e.g. `2000-01-01` | days since that date | no |
 
-<div align="center">
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-chat">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/run-on-studio.svg" height="36px" alt="Run on Studios"/>
-</a>
-</div>
+Without a person dataset the individuals are simply whoever appears in the events. `min_time` drops events before a given coordinate; it defaults to `0` for `birth` (dropping events dated before birth) and to `None` otherwise, where a negative number just means earlier than the reference date.
 
-&nbsp;
+A dataset should read `store.time_origin` rather than assume one because the numbers look the same on any axis. Delphi accepts only `birth`, because its `<no_event>` tokens are drawn over a 100-year lifetime and `AgeEncoding` encodes age since birth.
 
-Test how well the model works via an interactive chat. Use the `chat` command to chat, extract embeddings, etc...
+**Models that need more than one axis** (say age *and* calendar time) do not need a second cache, and nothing is stored twice. Every origin is a date, so the axes differ by one constant per individual, which the cache keeps in `time_offsets`:
 
-Here's an example showing how to use the Phi-2 LLM:
-```bash
-litgpt chat microsoft/phi-2
-
->> Prompt: What do Llamas eat?
+```python
+sequence = store.sequence(i)
+age = sequence["times"]                             # the stored axis
+calendar = store.times_from(i, age, "epoch")        # days since 1970-01-01
+since_2000 = store.times_from(i, age, "2000-01-01")
 ```
 
-<details>
-  <summary>Full code:</summary>
+Build such a cache with `time_origin="birth"`: that is the only origin that records each individual's birthdate, so it is the only one from which every other axis is reachable. The dataset then puts both arrays in the batch under whatever names its model reads.
 
-&nbsp;
+### Using NOTES attributes
 
-```bash
-# 1) List all supported LLMs
-litgpt download list
-
-# 2) Use a model (auto downloads weights)
-litgpt chat microsoft/phi-2
-
->> Prompt: What do Llamas eat?
-```
-
-The download of certain models requires an additional access token. You can read more about this in the [download](tutorials/download_model_weights.md#specific-models-and-access-tokens) documentation.
-
-</details>
-
-[Read the full chat docs](tutorials/inference.md).
-
-&nbsp;
-
-----
-
-## Pretrain an LLM
-
-<div align="center">
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-pretrain">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/run-on-studio.svg" height="36px" alt="Run on Studios"/>
-</a>
-</div>
-
-&nbsp;
-
-Pretraining is the process of teaching an AI model by exposing it to a large amount of data before it is fine-tuned for specific tasks.
-
-<details>
-  <summary>Show code:</summary>
-
-&nbsp;
-
-```bash
-mkdir -p custom_texts
-curl https://www.gutenberg.org/cache/epub/24440/pg24440.txt --output custom_texts/book1.txt
-curl https://www.gutenberg.org/cache/epub/26393/pg26393.txt --output custom_texts/book2.txt
-
-# 1) Download a tokenizer
-litgpt download EleutherAI/pythia-160m \
-  --tokenizer_only True
-
-# 2) Pretrain the model
-litgpt pretrain EleutherAI/pythia-160m \
-  --tokenizer_dir EleutherAI/pythia-160m \
-  --data TextFiles \
-  --data.train_data_path "custom_texts/" \
-  --train.max_tokens 10_000_000 \
-  --out_dir out/custom-model
-
-# 3) Test the model
-litgpt chat out/custom-model/final
-```
-</details>
-
-[Read the full pretraining docs](tutorials/pretrain.md)
-
-&nbsp;
-
-----
-
-## Continue pretraining an LLM
-
-<div align="center">
-<a target="_blank" href="https://lightning.ai/lightning-ai/studios/litgpt-continue-pretraining">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/run-on-studio.svg" height="36px" alt="Run on Studios"/>
-</a>
-</div>
-
-&nbsp;
-
-Continued pretraining is another way of finetuning that specializes an already pretrained model by training on custom data:
-
-<details>
-  <summary>Show code:</summary>
-
-&nbsp;
-
-```bash
-mkdir -p custom_texts
-curl https://www.gutenberg.org/cache/epub/24440/pg24440.txt --output custom_texts/book1.txt
-curl https://www.gutenberg.org/cache/epub/26393/pg26393.txt --output custom_texts/book2.txt
-
-# 1) Continue pretraining a model (auto downloads weights)
-litgpt pretrain EleutherAI/pythia-160m \
-  --tokenizer_dir EleutherAI/pythia-160m \
-  --initial_checkpoint_dir EleutherAI/pythia-160m \
-  --data TextFiles \
-  --data.train_data_path "custom_texts/" \
-  --train.max_tokens 10_000_000 \
-  --out_dir out/custom-model
-
-# 2) Test the model
-litgpt chat out/custom-model/final
-```
-
-</details>
-
-[Read the full continued pretraining docs](tutorials/pretrain.md#continued-pretraining-on-custom-data)
-
-&nbsp;
-
-----
-
-# State-of-the-art features
-
-✅ State-of-the-art optimizations: Flash Attention v2, multi-GPU support via fully-sharded data parallelism, [optional CPU offloading](tutorials/oom.md#do-sharding-across-multiple-gpus), and [TPU and XLA support](extensions/xla).</br>
-✅ [Pretrain](tutorials/pretrain.md), [finetune](tutorials/finetune.md), and [deploy](tutorials/inference.md)</br>
-✅ Reduce compute requirements with low-precision settings: FP16, BF16, and FP16/FP32 mixed.</br>
-✅ Lower memory requirements with [quantization](tutorials/quantize.md): 4-bit floats, 8-bit integers, and double quantization.</br>
-✅ [Configuration files](config_hub) for great out-of-the-box performance.</br>
-✅ Parameter-efficient finetuning: [LoRA](tutorials/finetune_lora.md), [QLoRA](tutorials/finetune_lora.md), [Adapter](tutorials/finetune_adapter.md), and [Adapter v2](tutorials/finetune_adapter.md).</br>
-✅ [Exporting](tutorials/convert_lit_models.md) to other popular model weight formats.</br>
-✅ Many popular datasets for [pretraining](tutorials/pretrain.md) and [finetuning](tutorials/prepare_dataset.md), and [support for custom datasets](tutorials/prepare_dataset.md#preparing-custom-datasets-for-instruction-finetuning).</br>
-✅ Readable and easy-to-modify code to experiment with the latest research ideas.</br>
-
-&nbsp;
-
----
-
-# Training recipes
-
-LitGPT comes with validated recipes (YAML configs) to train models under different conditions.  We've generated these recipes based on the parameters we found to perform the best for different training conditions.
-
-Browse all training recipes [here](config_hub).
-
-### Example
-
-```bash
-litgpt finetune \
-  --config https://raw.githubusercontent.com/Lightning-AI/litgpt/main/config_hub/finetune/llama-2-7b/lora.yaml
-```
-<details>
-  <summary>✅ Use configs to customize training</summary>
-
-Configs let you customize training for all granular parameters like:
+`NOTES` is not read unless requested. `notes_fields` maps a attribute name to the field to extract:
 
 ```yaml
-# The path to the base model's checkpoint directory to load for finetuning. (type: <class 'Path'>, default: checkpoints/stabilityai/stablelm-base-alpha-3b)
-checkpoint_dir: checkpoints/meta-llama/Llama-2-7b-hf
-
-# Directory in which to save checkpoints and logs. (type: <class 'Path'>, default: out/lora)
-out_dir: out/finetune/qlora-llama2-7b
-
-# The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true". (type: Optional[str], default: null)
-precision: bf16-true
-
-...
-```
-</details>
-
-<details>
-  <summary>✅ Example: LoRA finetuning config</summary>
-
-&nbsp;
-
-```yaml
-# The path to the base model's checkpoint directory to load for finetuning. (type: <class 'Path'>, default: checkpoints/stabilityai/stablelm-base-alpha-3b)
-checkpoint_dir: checkpoints/meta-llama/Llama-2-7b-hf
-
-# Directory in which to save checkpoints and logs. (type: <class 'Path'>, default: out/lora)
-out_dir: out/finetune/qlora-llama2-7b
-
-# The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true". (type: Optional[str], default: null)
-precision: bf16-true
-
-# If set, quantize the model with this algorithm. See ``tutorials/quantize.md`` for more information. (type: Optional[Literal['nf4', 'nf4-dq', 'fp4', 'fp4-dq', 'int8-training']], default: null)
-quantize: bnb.nf4
-
-# How many devices/GPUs to use. (type: Union[int, str], default: 1)
-devices: 1
-
-# How many nodes to use. (type: int, default: 1)
-num_nodes: 1
-
-# The LoRA rank. (type: int, default: 8)
-lora_r: 32
-
-# The LoRA alpha. (type: int, default: 16)
-lora_alpha: 16
-
-# The LoRA dropout value. (type: float, default: 0.05)
-lora_dropout: 0.05
-
-# Whether to apply LoRA to the query weights in attention. (type: bool, default: True)
-lora_query: true
-
-# Whether to apply LoRA to the key weights in attention. (type: bool, default: False)
-lora_key: false
-
-# Whether to apply LoRA to the value weights in attention. (type: bool, default: True)
-lora_value: true
-
-# Whether to apply LoRA to the output projection in the attention block. (type: bool, default: False)
-lora_projection: false
-
-# Whether to apply LoRA to the weights of the MLP in the attention block. (type: bool, default: False)
-lora_mlp: false
-
-# Whether to apply LoRA to output head in GPT. (type: bool, default: False)
-lora_head: false
-
-# Data-related arguments. If not provided, the default is ``litgpt.data.Alpaca``.
 data:
-  class_path: litgpt.data.Alpaca2k
+  class_path: DelphiLifeEvents
   init_args:
-    mask_prompt: false
-    val_split_fraction: 0.05
-    prompt_style: alpaca
-    ignore_index: -100
-    seed: 42
-    num_workers: 4
-    download_dir: data/alpaca2k
-
-# Training-related arguments. See ``litgpt.args.TrainArgs`` for details
-train:
-
-  # Number of optimizer steps between saving checkpoints (type: Optional[int], default: 1000)
-  save_interval: 200
-
-  # Number of iterations between logging calls (type: int, default: 1)
-  log_interval: 1
-
-  # Number of samples between optimizer steps across data-parallel ranks (type: int, default: 128)
-  global_batch_size: 8
-
-  # Number of samples per data-parallel rank (type: int, default: 4)
-  micro_batch_size: 2
-
-  # Number of iterations with learning rate warmup active (type: int, default: 100)
-  lr_warmup_steps: 10
-
-  # Number of epochs to train on (type: Optional[int], default: 5)
-  epochs: 4
-
-  # Total number of tokens to train on (type: Optional[int], default: null)
-  max_tokens:
-
-  # Limits the number of optimizer steps to run (type: Optional[int], default: null)
-  max_steps:
-
-  # Limits the length of samples (type: Optional[int], default: null)
-  max_seq_length: 512
-
-  # Whether to tie the embedding weights with the language modeling head weights (type: Optional[bool], default: null)
-  tie_embeddings:
-
-  #   (type: float, default: 0.0003)
-  learning_rate: 0.0002
-
-  #   (type: float, default: 0.02)
-  weight_decay: 0.0
-
-  #   (type: float, default: 0.9)
-  beta1: 0.9
-
-  #   (type: float, default: 0.95)
-  beta2: 0.95
-
-  #   (type: Optional[float], default: null)
-  max_norm:
-
-  #   (type: float, default: 6e-05)
-  min_lr: 6.0e-05
-
-# Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details
-eval:
-
-  # Number of optimizer steps between evaluation calls (type: int, default: 100)
-  interval: 100
-
-  # Number of tokens to generate (type: Optional[int], default: 100)
-  max_new_tokens: 100
-
-  # Number of iterations (type: int, default: 100)
-  max_iters: 100
-
-# The name of the logger to send metrics to. (type: Literal['wandb', 'tensorboard', 'csv'], default: csv)
-logger_name: csv
-
-# The random seed to use for reproducibility. (type: int, default: 1337)
-seed: 1337
+    notes_fields:
+      income: {field: income, dtype: DOUBLE, fill: 0.0}
 ```
-</details>
 
-<details>
-  <summary>✅ Override any parameter in the CLI:</summary>
+It works whether `NOTES` is stored as a struct, a map or a JSON string. Each dataset is read against its own schema. An event whose dataset lacks the field, or whose value is null, gets `fill`. Only numeric types are supported for now. The values are cached as `note_<name>.npy` and appear in batches as `note_<name>`, aligned with `input_ids`. Delphi ignores them; a new architecture can consume them in its `embed`.
+
+## Testing
+
+Run tests from the repository root. The `--extra test` option includes the testing
+dependencies declared in `pyproject.toml`; `uv run` prepares and uses the project's
+virtual environment automatically.
+
+During development, run the tests relevant to your changes. For example, after
+changing data preprocessing:
 
 ```bash
-litgpt finetune \
-  --config https://raw.githubusercontent.com/Lightning-AI/litgpt/main/config_hub/finetune/llama-2-7b/lora.yaml \
-  --lora_r 4
-```
-</details>
-
-&nbsp;
-
-----
-
-# Project highlights
-
-LitGPT powers many great AI projects, initiatives, challenges and of course enterprises. Please submit a pull request to be considered for a feature.
-
-<details>
-  <summary>📊 SAMBA: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling</summary>
-
-The [Samba](https://github.com/microsoft/Samba) project by researchers at Microsoft is built on top of the LitGPT code base and combines state space models with sliding window attention, which outperforms pure state space models.
-
-</details>
-
-<details>
-  <summary>🏆 NeurIPS 2023 Large Language Model Efficiency Challenge: 1 LLM + 1 GPU + 1 Day</summary>
-
-The LitGPT repository was the official starter kit for the [NeurIPS 2023 LLM Efficiency Challenge](https://llm-efficiency-challenge.github.io), which is a competition focused on finetuning an existing non-instruction tuned LLM for 24 hours on a single GPU.
-
-</details>
-
-<details>
-  <summary>🦙 TinyLlama: An Open-Source Small Language Model</summary>
-
-
-LitGPT powered the [TinyLlama project](https://github.com/jzhang38/TinyLlama) and [TinyLlama: An Open-Source Small Language Model](https://arxiv.org/abs/2401.02385) research paper.
-
-</details>
-
-<details>
-  <summary>🍪 MicroLlama: MicroLlama-300M</summary>
-
-[MicroLlama](https://github.com/keeeeenw/MicroLlama) is a 300M Llama model pretrained on 50B tokens powered by TinyLlama and LitGPT.
-</details>
-
-<details>
-  <summary>🔬 Pre-training Small Base LMs with Fewer Tokens</summary>
-
-The research paper ["Pre-training Small Base LMs with Fewer Tokens"](https://arxiv.org/abs/2404.08634), which utilizes LitGPT, develops smaller base language models by inheriting a few transformer blocks from larger models and training on a tiny fraction of the data used by the larger models. It demonstrates that these smaller models can perform comparably to larger models despite using significantly less training data and resources.
-
-</details>
-
-&nbsp;
-
-----
-
-# Community
-
-We welcome all individual contributors, regardless of their level of experience or hardware. Your contributions are valuable, and we are excited to see what you can accomplish in this collaborative and supportive environment.
-
-- [Request a feature](https://github.com/Lightning-AI/litgpt/issues)
-- [Submit your first contribution](https://lightning.ai/pages/community/tutorial/how-to-contribute-to-litgpt/)
-- [Join our Discord](https://discord.gg/VptPCZkGNa)
-
-&nbsp;
-
-# Tutorials
-
-🚀 [Get started](tutorials/0_to_litgpt.md)</br>
-⚡️ [Finetuning, incl. LoRA, QLoRA, and Adapters](tutorials/finetune.md)</br>
-🤖 [Pretraining](tutorials/pretrain.md)</br>
-💬 [Model evaluation](tutorials/evaluation.md)</br>
-📘 [Supported and custom datasets](tutorials/prepare_dataset.md)</br>
-🧹 [Quantization](tutorials/quantize.md)</br>
-🤯 [Tips for dealing with out-of-memory (OOM) errors](tutorials/oom.md)</br>
-🧑🏽‍💻 [Using cloud TPUs](extensions/xla)</br>
-
-&nbsp;
-
-----
-
-### Acknowledgments
-
-This implementation extends on [Lit-LLaMA](https://github.com/lightning-AI/lit-llama) and [nanoGPT](https://github.com/karpathy/nanoGPT), and it's **powered by [Lightning Fabric](https://lightning.ai/docs/fabric/stable/) ⚡**.
-
-- [@karpathy](https://github.com/karpathy) for [nanoGPT](https://github.com/karpathy/nanoGPT)
-- [@EleutherAI](https://github.com/EleutherAI) for [GPT-NeoX](https://github.com/EleutherAI/gpt-neox) and the [Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness)
-- [@TimDettmers](https://github.com/TimDettmers) for [bitsandbytes](https://github.com/TimDettmers/bitsandbytes)
-- [@Microsoft](https://github.com/microsoft) for [LoRA](https://github.com/microsoft/LoRA)
-- [@tridao](https://github.com/tridao) for [Flash Attention 2](https://github.com/Dao-AILab/flash-attention)
-
-### License
-
-LitGPT is released under the [Apache 2.0](https://github.com/Lightning-AI/litgpt/blob/main/LICENSE.md) license.
-
-### Citation
-
-If you use LitGPT in your research, please cite the following work:
-
-```bibtex
-@misc{litgpt-2023,
-  author       = {Lightning AI},
-  title        = {LitGPT},
-  howpublished = {\url{https://github.com/Lightning-AI/litgpt}},
-  year         = {2023},
-}
+uv run --extra test pytest tests/life_events/test_source.py -q
 ```
 
-&nbsp;
+Before opening a pull request or merging changes, run the full suite:
+
+```bash
+uv run --extra test pytest tests/ -q
+```
+
+Replace `-q` with `-v` to see individual test names and results.
+
+## Generative AI usage
+
+The code has been partially generated and refined with Claude Code (Opus 5). The authors have manually checked and
+validated the code for correctness.
