@@ -208,6 +208,27 @@ data:
 
 It works whether `NOTES` is stored as a struct, a map or a JSON string. Each dataset is read against its own schema. An event whose dataset lacks the field, or whose value is null, gets `fill`. Only numeric types are supported for now. The values are cached as `note_<name>.npy` and appear in batches as `note_<name>`, aligned with `input_ids`. Delphi ignores them; a new architecture can consume them in its `embed`.
 
+## Testing
+
+Run tests from the repository root. The `--extra test` option includes the testing
+dependencies declared in `pyproject.toml`; `uv run` prepares and uses the project's
+virtual environment automatically.
+
+During development, run the tests relevant to your changes. For example, after
+changing data preprocessing:
+
+```bash
+uv run --extra test pytest tests/life_events/test_source.py -q
+```
+
+Before opening a pull request or merging changes, run the full suite:
+
+```bash
+uv run --extra test pytest tests/ -q
+```
+
+Replace `-q` with `-v` to see individual test names and results.
+
 ## Generative AI usage
 
 The code has been partially generated and refined with Claude Code (Opus 5). The authors have manually checked and
