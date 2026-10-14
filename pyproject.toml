@@ -25,6 +25,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
+  "duckdb>=1.5.5",
   "jsonargparse[signatures]>=4.37,<=4.41; python_version>='3.10'", # required to work with Python >=3.10
   "lightning>=2.6.1",
   "numpy",
