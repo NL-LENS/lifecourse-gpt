@@ -57,18 +57,17 @@ Preparation is worth separating when it is slow, when it belongs on a different 
 than training, or when several runs should share one cache.
 
 To train on real data, `data.init_args.event_paths` and `person_path` should point to 
-Parquet files (a directory or a glob works too) and `model_config.vocab_size` and
-`padded_vocab_size` should be set to the `vocab_size` that `--prepare_data_only true` prints.
+Parquet files (a directory or a glob works too). The model's `vocab_size`, `padded_vocab_size`
+and `target_vocab_size` are read from the cache, so they never need to be set in the config.
 
 Static person-level attributes such as gender or migration background are columns of the
 person dataset, named in `data.init_args.static_fields` (e.g. `--data.init_args.static_fields '[GENDER]'`).
 Each value becomes a token `GENDER=F`, and a missing value becomes `GENDER=<unknown>`. These tokens
 come last in the vocabulary, so they count towards `vocab_size`. As in Delphi, they open every
 sequence at age 0 and are only read by the model: they survive windowing, are never prediction
-targets and are shuffled in training (`shuffle_statics`). Set `model_config.target_vocab_size` to the
-value the cache summary prints, the vocabulary without the static tokens: only those logits count
-as event rates, in the loss and when sampling, so static tokens never add to the total event rate
-and `litgpt generate` never samples them.
+targets and are shuffled in training (`shuffle_statics`). The model's `target_vocab_size` is the
+vocabulary without the static tokens: only those logits count as event rates, in the loss and when
+sampling, so static tokens never add to the total event rate and `litgpt generate` never samples them.
 
 To sample trajectories from a trained checkpoint:
 
