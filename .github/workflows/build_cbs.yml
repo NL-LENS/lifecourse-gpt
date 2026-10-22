@@ -1,0 +1,90 @@
+name: CBS build
+
+on:
+  push:
+    branches: [main]
+  # Note: using `pull_request` (not `pull_request_target`) for security reasons.
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# lock down all permissions by default
+permissions:
+  contents: read # needed to check out code
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The frozen package set of the CBS Remote Access environment.
+  CBS_REQUIREMENTS: https://raw.githubusercontent.com/sodascience/cbs_python/refs/heads/main/environment0000.txt
+
+jobs:
+  build:
+    name: Build for windows-latest
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The environment uses Python 3.12
+        python-version: ["3.12"]
+    # Installing the whole RA baseline is slow: it is a full scientific stack.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Python info
+        run: |
+          which python
+          python --version
+
+      - name: Download the CBS baseline
+        run: |
+          curl -fsSL "$CBS_REQUIREMENTS" -o environment0000.txt
+          # A constraints file may carry requirements only, so drop the --find-links line
+          # that the baseline uses to reach the PyTorch Geometric wheels.
+          grep -v '^--' environment0000.txt > cbs-constraints.txt
+
+      - name: Install the CBS baseline into the system interpreter
+        # Mirrors the RA machine, where this set is preinstalled and cannot be changed.
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install -r environment0000.txt
+
+      - name: Create the derived virtual environment
+        # What a researcher can actually do on the RA machine: layer a venv on top of the
+        # baseline, which ships every litgpt dependency. The machine has no network, hence
+        # `--no-index`: the build fails if litgpt needs a package the baseline lacks, or a
+        # version other than the one it pins. `--no-build-isolation` for the same reason,
+        # since isolation would fetch a build backend.
+        run: |
+          python -m venv --system-site-packages .venv
+          source .venv/Scripts/activate
+          python -m pip install '.[extra,test]' --no-build-isolation --no-index
+          python -m pip list
+
+      - name: Check for unsatisfied dependencies
+        # Advisory only: the baseline carries ~260 packages of its own and its internal
+        # consistency is not litgpt's contract. What litgpt must not do is move one of
+        # those pins, and the `--no-index` above is what fails the build if it tries.
+        continue-on-error: true
+        run: .venv/Scripts/python -m pip check
+
+      - name: Run unit tests
+        run: .venv/Scripts/python -m pytest -v tests/ --timeout=180 --durations=20
+
+      - name: Verify that we can build the package
+        run: |
+          source .venv/Scripts/activate
+          python -m pip install build -c cbs-constraints.txt
+          python -m build --no-isolation
