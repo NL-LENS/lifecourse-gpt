@@ -16,16 +16,15 @@ def test_cli():
     out = out.getvalue()
     assert "usage: litgpt" in out
     assert "{pretrain,dummy_data,generate}" in out
-    assert (
-        """Available subcommands:
-    pretrain            Pretrain a model."""
-        in out
-    )
+    # jsonargparse 4.47+ prints a "(required)" line between these two.
+    assert "Available subcommands:" in out
+    assert "    pretrain            Pretrain a model." in out
 
     out = StringIO()
     with pytest.raises(SystemExit), redirect_stdout(out), mock.patch("sys.argv", ["litgpt", "pretrain", "-h"]):
         main()
-    out = out.getvalue()
+    # jsonargparse 4.51+ spells an optional type `int | null` rather than `int | None`.
+    out = out.getvalue().replace("| null", "| None")
     assert (
         """--train.max_tokens MAX_TOKENS
                         Total number of tokens to train on (type: int | None,
