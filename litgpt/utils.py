@@ -244,6 +244,7 @@ def choose_logger(
     if logger_name == "tensorboard":
         return TensorBoardLogger(root_dir=(out_dir / "logs"), name="tensorboard", **kwargs)
     if logger_name == "wandb":
+        log_args = log_args or {}
         project = log_args.pop("project", name)
         run = log_args.pop("run", os.environ.get("WANDB_RUN_NAME"))
         group = log_args.pop("group", os.environ.get("WANDB_RUN_GROUP"))
