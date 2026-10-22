@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-24.04", "macOS-14", "windows-2022"]
-        python-version: ["3.10"]
+        python-version: ["3.12"]
     timeout-minutes: 10
     steps:
       - name: Checkout generic
@@ -73,12 +73,12 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-24.04"]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
         requires: ["latest"]
         include:
-          - { os: "ubuntu-24.04", python-version: "3.10", requires: "oldest" }
-          - { os: "windows-2022", python-version: "3.10", requires: "latest" }
-          - { os: "macOS-14", python-version: "3.10", requires: "latest" }
+          - { os: "ubuntu-24.04", python-version: "3.12", requires: "oldest" }
+          - { os: "windows-2022", python-version: "3.12", requires: "latest" }
+          - { os: "macOS-14", python-version: "3.12", requires: "latest" }
     timeout-minutes: 20
     steps:
       - name: Checkout generic
