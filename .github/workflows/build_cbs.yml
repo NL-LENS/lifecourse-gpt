@@ -31,9 +31,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The RA image pins numpy 2.4.6, which rules out 3.10 and below; both
-        # remaining versions resolve the baseline identically.
-        python-version: ["3.11", "3.12"]
+        # The environment uses Python 3.12
+        python-version: ["3.12"]
     # Installing the whole RA baseline is slow: it is a full scientific stack.
     timeout-minutes: 60
     steps:
