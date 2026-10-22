@@ -166,7 +166,7 @@ merging, joining and sorting in `prepare_data`, can be tuned as follows:
 | Field | Default | What it does |
 | --- | --- | --- |
 | `duckdb_threads` | all cores | Threads for the cache build. Lower it to leave room for other work. |
-| `duckdb_memory_limit` | ~80% of RAM | e.g. `8GB`. **Should be paired it with a temp directory**. |
+| `duckdb_memory_limit` | ~80% of RAM | e.g. `8GB`. **Should be paired with a temp directory**. |
 | `duckdb_temp_directory` | none | Where DuckDB spills to disk, which is what lets the sort and the join exceed the memory limit. |
 
 For example:
@@ -175,8 +175,6 @@ For example:
 litgpt pretrain --config config_hub/pretrain/delphi-2m.yaml --prepare_data_only true \
   --data.duckdb_threads 8 --data.duckdb_memory_limit 8GB --data.duckdb_temp_directory /scratch/duckdb
 ```
-
-These can also be set with environment variables.
 
 ### The time axis
 
@@ -203,7 +201,7 @@ since_2000 = store.times_from(i, age, "2000-01-01")
 
 Build such a cache with `time_origin="birth"`: that is the only origin that records each individual's birthdate, so it is the only one from which every other axis is reachable. The dataset then puts both arrays in the batch under whatever names its model reads.
 
-### Using NOTES attributes
+### Using NOTES attributes (**experimental; will likely be changed soon**)
 
 `NOTES` is not read unless requested. `notes_fields` maps a attribute name to the field to extract:
 
@@ -215,7 +213,37 @@ data:
       income: {field: income, dtype: DOUBLE, fill: 0.0}
 ```
 
-It works whether `NOTES` is stored as a struct, a map or a JSON string. Each dataset is read against its own schema. An event whose dataset lacks the field, or whose value is null, gets `fill`. Only numeric types are supported for now. The values are cached as `note_<name>.npy` and appear in batches as `note_<name>`, aligned with `input_ids`. Delphi ignores them; a new architecture can consume them in its `embed`.
+It works whether `NOTES` is stored as a struct, a map or a JSON string. Each dataset is read against its own schema. An event whose dataset lacks the field, or whose value is null, gets `fill`. Only numeric types are supported for now. Every note field is added as another sequence parallel to the event token and age/time sequences to the model input. Thus, if a note field occurs only for rare events, its sequence will be dominated by its `fill` value. This is only feasible for a few note fields and not memory efficient. For example, dataset 1 has the following silver layer layout:
+
+```
+ID | TIME       | EVENT       | NOTES
+------------------------------------------------
+0  | 2026-01-01 | tax_declaration | {taxable_income: 15.000} 
+0  | 2027-01-01 | tax_declaration | {taxable_income: 16.000} 
+.. | ...        | ...         | ... 
+```
+
+Another dataset 2 has a different layout:
+
+```
+ID | TIME       | EVENT       | NOTES
+------------------------------------------------
+0  | 2026-02-15 | address_change | {new_address: Amsterdam}
+0  | 2028-02-15 | address_change | {new_address: Rotterdam}
+.. | ...        | ...         | ... 
+```
+
+The joined dataset with `fill=0.0` for `taxable_income` will then look like:
+
+```
+event: tax_declaration, address_change, tax_declaration, address_change
+taxable_income: 15.000, 0.0, 16.000, 0.0
+
+```
+
+The values are cached as `note_<name>.npy` and appear in batches as `note_<name>`, aligned with `input_ids`. Delphi ignores them; a new architecture can consume them in its `embed`.
+
+The current implementation is not very efficient and will be changed soon.
 
 ## Testing
 
