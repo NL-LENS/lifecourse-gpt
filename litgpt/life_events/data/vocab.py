@@ -9,8 +9,8 @@ from pathlib import Path
 
 __all__ = ["EventVocab"]
 
-VOCAB_VERSION = 2
-"""Version 2 added `statics`."""
+VOCAB_VERSION = 1
+"""To check whether loaded vocabularies are up to date."""
 
 UNKNOWN_STATIC = "<unknown>"
 """The value a static attribute takes for a person whose value is missing."""
