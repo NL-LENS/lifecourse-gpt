@@ -10,8 +10,6 @@ from unittest.mock import Mock
 
 import pytest
 
-pytest.importorskip("duckdb")
-
 import litgpt.pretrain as pretrain  # noqa: E402
 from litgpt.config import Config  # noqa: E402
 from litgpt.life_events.delphi.data import DelphiLifeEvents  # noqa: E402

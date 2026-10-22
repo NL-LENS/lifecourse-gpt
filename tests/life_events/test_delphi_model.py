@@ -92,20 +92,28 @@ def test_age_unit_rescales_the_age_encoding():
 def test_tie_mask_hides_keys_at_the_target_age():
     age = torch.tensor([[0, 10, 10, 20]])
     targets_age = torch.tensor([[10, 10, 20, 30]])
-    mask = build_tie_mask(age, targets_age)[0, 0]
-    # Query 0 predicts an event at age 10: it may only see itself (age 0).
-    assert mask[0].tolist() == [True, False, False, False]
-    # Query 1 sits at its own target's age, so it has to hide itself as well.
-    assert mask[1].tolist() == [True, False, False, False]
-    # Query 2 predicts age 20: both age-10 events are fair game now.
-    assert mask[2].tolist() == [True, True, True, False]
+    mask = build_tie_mask(age, targets_age)
+    expected = torch.tensor(
+        [
+            # Query 0 predicts an event at age 10: it may only see itself (age 0).
+            [1, 0, 0, 0],
+            # Query 1 sits at its own target's age, so it has to hide itself as well.
+            [1, 0, 0, 0],
+            # Query 2 predicts age 20: both age-10 events are fair game now.
+            [1, 1, 1, 0],
+            # Query 3 predicts age 30: nothing is tied, so this is plain causal attention.
+            [1, 1, 1, 1],
+        ],
+        dtype=torch.bool,
+    )
+    assert torch.equal(mask, expected[None, None])
     # The waiting time for query 1 is measured from the last event it can see.
-    assert last_visible_index(build_tie_mask(age, targets_age)).tolist() == [[0, 0, 2, 3]]
+    assert last_visible_index(mask).tolist() == [[0, 0, 2, 3]]
 
     # A first query tied to its own target has nothing left to see, and falls back to
-    # itself rather than attending to nothing.
-    lone = build_tie_mask(torch.tensor([[10, 10]]), torch.tensor([[10, 20]]))[0, 0]
-    assert lone[0].tolist() == [True, False]
+    # itself rather than attending to nothing, otherwise softmax is ill-defined
+    lone = build_tie_mask(torch.tensor([[10, 10]]), torch.tensor([[10, 20]]))
+    assert torch.equal(lone, torch.tensor([[[[1, 0], [1, 1]]]], dtype=torch.bool))
 
 
 def test_tie_mask_drops_padding():
