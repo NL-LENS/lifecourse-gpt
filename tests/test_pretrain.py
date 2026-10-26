@@ -9,37 +9,84 @@ from unittest.mock import ANY, Mock
 import pytest
 import torch
 from lightning.fabric.strategies import FSDPStrategy, SingleDeviceStrategy
+from runif import RunIf
 from torch.utils.data import DataLoader
 
 from litgpt import pretrain
 from litgpt.args import EvalArgs, TrainArgs
 from litgpt.config import Config
+from litgpt.data import DataModule
 from litgpt.pretrain import initialize_weights
-from litgpt.utils import _RunIf
 
 
-@_RunIf(min_cuda_gpus=1, standalone=True)
+class TokenData(DataModule):
+    """Plain token sequences for `GPT`, which `pretrain` shifts into inputs and targets itself."""
+
+    def connect(self, batch_size: int = 1, max_seq_length: int | None = None) -> None:
+        self.batch_size = batch_size
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(torch.tensor([[0, 1, 2], [3, 4, 5], [0, 1, 2]]), batch_size=self.batch_size)
+
+    val_dataloader = train_dataloader
+
+
+@pytest.mark.parametrize("optimizer", ("AdamW", "SGD", "RMSprop"))
 @mock.patch("litgpt.pretrain.save_hyperparameters")
-def test_optimizer_args(_, tmp_path):
+def test_optimizer_args(_, optimizer, tmp_path):
     model_config = Config(block_size=2, n_layer=2, n_embd=4, n_head=2, padded_vocab_size=8)
 
-    dataset = torch.tensor([[0, 1, 2], [3, 4, 5], [0, 1, 2]])
-    dataloader = DataLoader(dataset)
-    pretrain.get_dataloaders = Mock(return_value=(dataloader, dataloader))
+    pretrain.setup(
+        "custom",
+        devices=1,
+        precision="32-true",
+        optimizer=optimizer,
+        model_config=model_config,
+        data=TokenData(),
+        out_dir=tmp_path,
+        logger_name="csv",
+        train=TrainArgs(
+            global_batch_size=2, max_tokens=16, save_interval=1, micro_batch_size=1, max_norm=1.0, compile=False
+        ),
+        eval=EvalArgs(interval=1, max_iters=1, final_validation=False),
+    )
 
-    for i in ("AdamW", "SGD", "RMSprop"):
+
+@mock.patch("litgpt.pretrain.save_hyperparameters")
+def test_pretrain_on_cpu(_, tmp_path):
+    model_config = Config(block_size=2, n_layer=2, n_embd=8, n_head=4, padded_vocab_size=8)
+
+    out_dir = tmp_path / "out"
+    stdout = StringIO()
+    with redirect_stdout(stdout):
         pretrain.setup(
-            "pythia-14m",
+            "custom",
             devices=1,
-            optimizer="RMSprop",
+            precision="32-true",
             model_config=model_config,
-            out_dir=tmp_path,
-            train=TrainArgs(global_batch_size=2, max_tokens=16, save_interval=1, micro_batch_size=1, max_norm=1.0),
-            eval=EvalArgs(interval=1, max_iters=1, final_validation=False),
+            data=TokenData(),
+            out_dir=out_dir,
+            logger_name="csv",
+            train=TrainArgs(
+                global_batch_size=2, max_tokens=16, save_interval=2, micro_batch_size=1, max_norm=1.0, compile=False
+            ),
+            eval=EvalArgs(interval=2, max_iters=1, final_validation=False),
         )
 
+    # 16 tokens of 2 per micro batch are 8 iterations, accumulated in pairs into 4 steps.
+    checkpoint_dirs = {"step-00000002", "step-00000004", "final"}
+    assert checkpoint_dirs.issubset(set(os.listdir(out_dir)))
+    for checkpoint_dir in checkpoint_dirs:
+        assert set(os.listdir(out_dir / checkpoint_dir)) == {"lit_model.pth", "model_config.yaml"}
+    assert (out_dir / "logs" / "csv" / "version_0").is_dir()
 
-@_RunIf(min_cuda_gpus=2, standalone=True)
+    logs = stdout.getvalue()
+    assert logs.count("(step)") == 4
+    assert logs.count("val loss") == 2
+    assert "Total parameters: 1,888" in logs
+
+
+@RunIf(min_cuda_gpus=2, standalone=True)
 # If we were to use `save_hyperparameters()`, we would have to patch `sys.argv` or otherwise
 # the CLI would capture pytest args, but unfortunately patching would mess with subprocess
 # launching, so we need to mock `save_hyperparameters()`
@@ -49,17 +96,14 @@ def test_optimizer_args(_, tmp_path):
 def test_pretrain(_, tmp_path):
     model_config = Config(block_size=2, n_layer=2, n_embd=8, n_head=4, padded_vocab_size=8)
 
-    dataset = torch.tensor([[0, 1, 2], [3, 4, 5], [0, 1, 2]])
-    dataloader = DataLoader(dataset)
-    pretrain.get_dataloaders = Mock(return_value=(dataloader, dataloader))
-
     out_dir = tmp_path / "out"
     stdout = StringIO()
     with redirect_stdout(stdout):
         pretrain.setup(
-            "pythia-14m",
+            "custom",
             devices=2,
             model_config=model_config,
+            data=TokenData(),
             out_dir=out_dir,
             train=TrainArgs(global_batch_size=2, max_tokens=16, save_interval=1, micro_batch_size=1, max_norm=1.0),
             eval=EvalArgs(interval=1, max_iters=1, final_validation=False),
@@ -72,7 +116,6 @@ def test_pretrain(_, tmp_path):
         assert checkpoint_dirs.issubset(out_dir_contents)
         assert all((out_dir / p).is_dir() for p in checkpoint_dirs)
         for checkpoint_dir in checkpoint_dirs:
-            # the `tokenizer_dir` is None by default, so only 'lit_model.pth' shows here
             assert set(os.listdir(out_dir / checkpoint_dir)) == {"lit_model.pth", "model_config.yaml"}
 
         assert (out_dir / "logs" / "tensorboard" / "version_0").is_dir()
@@ -86,24 +129,23 @@ def test_pretrain(_, tmp_path):
     torch.distributed.barrier()
 
 
-@_RunIf(min_cuda_gpus=2, standalone=True)
 @mock.patch("litgpt.pretrain.L.Fabric.load_raw")
 # See comment in `test_pretrain` why we need to mock `save_hyperparameters()`
 @mock.patch("litgpt.pretrain.save_hyperparameters")
-def test_initial_checkpoint_dir(_, load_mock, tmp_path):
+def test_initial_checkpoint_dir(_, load_mock, tmp_path, monkeypatch):
     model_config = Config(block_size=2, n_layer=2, n_embd=8, n_head=4, padded_vocab_size=8)
-
-    dataset = torch.tensor([[0, 1, 2], [3, 4, 5], [0, 1, 2]])
-    dataloader = DataLoader(dataset)
-    pretrain.get_dataloaders = Mock(return_value=(dataloader, dataloader))
-    pretrain.fit = Mock()
+    monkeypatch.setattr(pretrain, "fit", Mock())
 
     pretrain.setup(
-        "pythia-14m",
+        "custom",
         initial_checkpoint_dir=tmp_path,
-        devices=torch.cuda.device_count(),
+        devices=1,
+        precision="32-true",
         model_config=model_config,
+        data=TokenData(),
         out_dir=tmp_path,
+        logger_name="csv",
+        train=TrainArgs(global_batch_size=2, max_tokens=16, micro_batch_size=1, max_norm=1.0, compile=False),
     )
 
     load_mock.assert_called_once_with(tmp_path / "lit_model.pth", ANY)

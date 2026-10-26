@@ -1,18 +1,18 @@
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = [
-  "setuptools>=68.2.2",
-  "wheel>=0.41.2",
+  "setuptools>=70.1", # ships bdist_wheel itself, so no separate `wheel` is needed
 ]
 
 [project]
 name = "litgpt"
 version = "0.5.13"
-description = "Hackable implementation of state-of-the-art open-source LLMs"
+description = "GPT-style sequence models for life-course event data"
 readme = "README.md"
 license = { file = "LICENSE.md" }
 authors = [
-  { name = "Lightning AI", email = "contact@lightning.ai" },
+  { name = "Netherlands eScience Center" },
+  { name = "ODISSEI" },
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -24,68 +24,30 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  # download models:
-  "huggingface-hub>=0.30,<1.4",
-  "jsonargparse[signatures]>=4.37,<=4.41; python_version>='3.10'", # required to work with Python >=3.10
+  "jsonargparse[signatures]>=4.37,<=4.52",
   "lightning>=2.6.1",
-  "psutil==7.2.2",
-  "safetensors>=0.4.3",
-  # tokenization in most models:
-  "tokenizers>=0.21",
+  "numpy",
   "torch>=2.7",
-  # convert_hf_checkpoint
-  "tqdm>4.66",
-]
-optional-dependencies.compiler = [
-  # compilaton:
-  "lightning-thunder>=0.2.dev20250119; python_version>='3.10' and sys_platform=='linux'",
-  # thunder references torch's named-tensor APIs at import time, removed in torch 2.13
-  # (pytorch/pytorch#173895). No thunder release supports 2.13 yet, so cap it here only.
-  "torch<2.13; python_version>='3.10' and sys_platform=='linux'",
+  # litgpt.pretrain:
+  "torchmetrics>=1.3.1",
 ]
 optional-dependencies.extra = [
-  "bitsandbytes>=0.42,<0.43; sys_platform=='darwin'",
-  # quantization:
-  "bitsandbytes>=0.45.2,<0.50; sys_platform=='linux' or sys_platform=='win32'",
-  # litgpt.evaluate:
-  "datasets>=2.18,<4",
-  # download:
-  "huggingface-hub[hf-transfer]>=0.21",
-  "litdata==0.2.59",
-  # litgpt logging:
-  "litlogger>=0.1.7",
-  # litgpt.deploy:
-  "litserve>0.2",
-  # lm-eval: pinned <0.4.9.1 due to trust_remote_code issues with datasets like logiqa.
-  # See: https://github.com/EleutherAI/lm-evaluation-harness/issues/3171
-  "lm-eval>=0.4.2,<0.4.9.1",
-  # litgpt.data.prepare_starcoder.py:
-  "pandas>=1.9",
+  # litgpt.life_events.data:
+  "duckdb>=1.0",
+  # litgpt.life_events.data, litgpt.life_events.dummy_data:
   "pyarrow>=15.0.2",
-  # litgpt.data:
-  "requests>=2.31",
-  # llama-based models:
-  "sentencepiece>=0.2",
-  # litgpt.pretrain:
+  # litgpt.pretrain logger_name="tensorboard":
   "tensorboard>=2.14",
-  "torchmetrics>=1.3.1",
-  "transformers>=4.51.3,<4.57",
-  # litdata, only on non-Windows:
-  "uvloop>=0.2; sys_platform!='win32'",
-  # litgpt.data.prepare_slimpajama.py:
-  "zstandard>=0.22",
 ]
 optional-dependencies.test = [
-  "einops>=0.7",
-  "protobuf>=4.23.4",
+  # litgpt.life_events.data:
+  "duckdb>=1.0",
+  "pyarrow>=15.0.2",
   "pytest>=8.1.1",
-  "pytest-benchmark>=5.1",
-  "pytest-dependency>=0.6",
   "pytest-rerunfailures>=14",
   "pytest-timeout>=2.3.1",
 ]
-urls.documentation = "https://github.com/lightning-AI/litgpt/tutorials"
-urls.homepage = "https://github.com/lightning-AI/litgpt"
+urls.homepage = "https://github.com/NL-LENS/lifecourse-gpt"
 scripts.litgpt = "litgpt.__main__:main"
 
 [tool.setuptools]
@@ -132,10 +94,6 @@ lint.pydocstyle.convention = "google"
 [tool.codespell]
 # skip = '*.py'
 quiet-level = 3
-ignore-words-list = """
-  tral, \
-  Rockerfeller
-"""
 
 [tool.pytest]
 ini_options.addopts = [

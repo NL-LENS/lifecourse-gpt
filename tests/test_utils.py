@@ -1,127 +1,43 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 import os
-from contextlib import redirect_stderr
 from dataclasses import asdict
-from io import StringIO
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 import pytest
 import torch
 import torch.nn.functional as F
 import yaml
-from lightning import Fabric
 from lightning.fabric.loggers import CSVLogger, TensorBoardLogger
-from lightning.fabric.plugins import BitsandbytesPrecision
 from lightning.pytorch.loggers import LitLogger, MLFlowLogger, WandbLogger
+from lightning_utilities.core.imports import RequirementCache
 
-from litgpt import GPT
 from litgpt.args import TrainArgs
-from litgpt.constants import (
-    _LITLOGGER_AVAILABLE,
-    _MLFLOW_AVAILABLE,
-    _MLFLOW_SKINNY_AVAILABLE,
-    _TENSORBOARD_AVAILABLE,
-    _WANDB_AVAILABLE,
-)
+from litgpt.constants import _LITLOGGER_AVAILABLE
 from litgpt.parser_config import save_hyperparameters
 from litgpt.utils import (
     CLI,
     CycleIterator,
-    _RunIf,
     capture_hparams,
-    check_file_size_on_cpu_and_warn,
     check_nvlink_connectivity,
-    check_valid_checkpoint_dir,
     choose_logger,
     chunked_cross_entropy,
-    copy_config_files,
     extend_checkpoint_dir,
     find_resume_path,
-    fix_and_load_json,
-    incremental_save,
     init_out_dir,
-    instantiate_bnb_optimizer,
     instantiate_torch_optimizer,
     num_parameters,
     parse_devices,
-    select_sft_generate_example,
 )
+
+_TENSORBOARD_AVAILABLE = RequirementCache("tensorboard")
+_WANDB_AVAILABLE = RequirementCache("wandb")
+_MLFLOW_AVAILABLE = RequirementCache("mlflow")
+_MLFLOW_SKINNY_AVAILABLE = RequirementCache("mlflow-skinny")
 
 
 # match fails on windows. why did they have to use backslashes?
-@_RunIf(skip_windows=True)
-def test_check_valid_checkpoint_dir(tmp_path):
-    os.chdir(tmp_path)
-
-    out = StringIO()
-    with pytest.raises(SystemExit), redirect_stderr(out):
-        check_valid_checkpoint_dir(tmp_path)
-    out = out.getvalue().strip()
-    expected = f"""
-checkpoint_dir '{str(tmp_path.absolute())}' is missing the files: ['lit_model.pth', 'model_config.yaml', 'tokenizer.json OR tokenizer.model', 'tokenizer_config.json'].
-Find download instructions at https://github.com/Lightning-AI/litgpt/blob/main/tutorials
-
-See all download options by running:
- litgpt download
-    """.strip()
-    assert out == expected
-
-    out = StringIO()
-    checkpoint_dir = tmp_path / "checkpoints" / "stabilityai" / "stablelm-base-alpha-3b"
-    with pytest.raises(SystemExit), redirect_stderr(out):
-        check_valid_checkpoint_dir(checkpoint_dir)
-    out = out.getvalue().strip()
-    expected = f"""
-checkpoint_dir '{str(checkpoint_dir.absolute())}' is not a checkpoint directory.
-Find download instructions at https://github.com/Lightning-AI/litgpt/blob/main/tutorials
-
-See all download options by running:
- litgpt download
-    """.strip()
-    assert out == expected
-
-    out = StringIO()
-    checkpoint_dir.mkdir(parents=True)
-    foo_checkpoint_dir = tmp_path / "foo"
-    with pytest.raises(SystemExit), redirect_stderr(out):
-        check_valid_checkpoint_dir(foo_checkpoint_dir)
-    out = out.getvalue().strip()
-    expected = f"""
-checkpoint_dir '{str(foo_checkpoint_dir.absolute())}' is not a checkpoint directory.
-Find download instructions at https://github.com/Lightning-AI/litgpt/blob/main/tutorials
-
-You have downloaded locally:
-'{str(checkpoint_dir.absolute())}'
-
-See all download options by running:
- litgpt download
-    """.strip()
-    assert out == expected
-
-
-def test_incremental_write(tmp_path):
-    sd = {str(k): torch.randn(5, 10) for k in range(3)}
-    sd["0"].someattr = 1
-    sd_expected = {k: v.clone() for k, v in sd.items()}
-    fn = str(tmp_path / "test.pt")
-    with incremental_save(fn) as f:
-        sd["0"] = f.store_early(sd["0"])
-        sd["2"] = f.store_early(sd["2"])
-        f.save(sd)
-    sd_actual = torch.load(fn)
-    assert sd_actual.keys() == sd_expected.keys()
-    assert sd_actual["0"].someattr == 1  # requires PyTorch 2.0+
-    for k, v_expected in sd_expected.items():
-        v_actual = sd_actual[k]
-        torch.testing.assert_close(v_expected, v_actual)
-    sd_actual = torch.load(fn, weights_only=True)
-    assert sd_actual.keys() == sd_expected.keys()
-    assert sd_actual["0"].someattr == 1  # requires PyTorch 2.0+
-    for k, v_expected in sd_expected.items():
-        v_actual = sd_actual[k]
-        torch.testing.assert_close(v_expected, v_actual)
 
 
 @pytest.mark.parametrize("B", (1, 2))
@@ -175,21 +91,6 @@ def test_num_parameters():
     assert num_parameters(model, requires_grad=False) == 2
 
 
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize("mode", ["nf4", "nf4-dq", "fp4", "fp4-dq", "int8", "int8-training"])
-def test_num_parameters_bitsandbytes(mode):
-    plugin = BitsandbytesPrecision(mode=mode)
-    fabric = Fabric(plugins=plugin, accelerator="cuda", devices=1)
-
-    model = torch.nn.Linear(10, 10)
-    model = fabric.setup(model)
-    assert num_parameters(model) == 110
-
-    with fabric.init_module(empty_init=True):
-        model = GPT.from_name("pythia-14m")
-    assert num_parameters(model) == 14067712
-
-
 def test_cycle_iterator():
     iterator = CycleIterator([])
     with pytest.raises(StopIteration):
@@ -223,13 +124,6 @@ def test_parse_devices():
         assert parse_devices(-1) == 3
 
     assert parse_devices(5) == 5
-
-
-def test_copy_config_files(fake_checkpoint_dir, tmp_path):
-    copy_config_files(fake_checkpoint_dir, tmp_path)
-    expected = {"model_config.yaml", "tokenizer_config.json", "tokenizer.json"}
-    contents = set(os.listdir(tmp_path))
-    assert expected.issubset(contents)
 
 
 def test_capture_hparams():
@@ -276,12 +170,8 @@ def _test_function2(out_dir: Path, foo: bool = False, bar: int = 1):
     "command",
     [
         "any.py",
-        "litgpt finetune",
-        "litgpt finetune_full",
-        "litgpt finetune_lora",
-        "litgpt finetune_adapter",
-        "litgpt finetune_adapter_v2",
         "litgpt pretrain",
+        "litgpt generate",
     ],
 )
 def test_save_hyperparameters_known_commands(command, tmp_path):
@@ -366,29 +256,6 @@ def model_parameters():
     return [torch.nn.Parameter(torch.randn(2, 2))]
 
 
-def test_instantiate_bnb_optimizer_with_str(model_parameters):
-    import bitsandbytes as bnb
-
-    with mock.patch("litgpt.utils.get_argument_names", return_value={"lr", "eps", "weight_decay"}):
-        optimizer = instantiate_bnb_optimizer("AdamW", model_parameters)
-        assert isinstance(optimizer, bnb.optim.adamw.PagedAdamW)
-
-
-def test_instantiate_bnb_optimizer_with_dict(model_parameters):
-    import bitsandbytes as bnb
-
-    optimizer_dict = {"class_path": "AdamW", "init_args": {"lr": 0.01}}
-    with mock.patch("litgpt.utils.get_argument_names", return_value={"lr", "eps", "weight_decay"}):
-        optimizer = instantiate_bnb_optimizer(optimizer_dict, model_parameters)
-        assert isinstance(optimizer, bnb.optim.adamw.PagedAdamW)
-        assert optimizer.param_groups[0]["lr"] == 0.01
-
-
-def test_instantiate_bnb_optimizer_with_invalid_str(model_parameters):
-    with pytest.raises(ValueError, match="only supports the AdamW"):
-        instantiate_bnb_optimizer("SGD", model_parameters)
-
-
 def test_instantiate_torch_optimizer_with_str(model_parameters):
     optimizer = instantiate_torch_optimizer("Adam", model_parameters, lr=0.01)
     assert isinstance(optimizer, torch.optim.Adam)
@@ -461,32 +328,6 @@ def test_extend_checkpoint_dir(input_path, expected):
 )
 def test_extend_checkpoint_dir_dont_exist(input_path, expected):
     assert extend_checkpoint_dir(input_path) == expected
-
-
-def test_file_size_below_limit_on_cpu():
-    # Test file size below limit on CPU
-    with NamedTemporaryFile() as temp_file:
-        with mock.patch("os.path.getsize", return_value=4_000_000_000):
-            size = check_file_size_on_cpu_and_warn(temp_file.name, "cpu")
-            assert size == 4_000_000_000
-
-
-def test_file_size_above_limit_on_cpu():
-    # Test file size above limit on CPU
-    with NamedTemporaryFile() as temp_file:
-        with mock.patch("os.path.getsize", return_value=4_600_000_000):
-            with pytest.warns(UserWarning) as record:
-                size = check_file_size_on_cpu_and_warn(temp_file.name, "cpu")
-            assert size == 4_600_000_000
-            assert "over 4.2 GB" in str(record[0].message)
-
-
-def test_file_size_above_limit_on_gpu():
-    # Test file size above limit on GPU should not warn
-    with NamedTemporaryFile() as temp_file:
-        with mock.patch("os.path.getsize", return_value=4_600_000_000):
-            size = check_file_size_on_cpu_and_warn(temp_file.name, "gpu")
-            assert size == 4_600_000_000
 
 
 @pytest.fixture
@@ -746,114 +587,3 @@ def test_check_nvlink_connectivity__returns_unrecognized_vendor_when_unrecognize
     with mock.patch("builtins.print") as mock_print:
         check_nvlink_connectivity()
         mock_print.assert_any_call("Unrecognized GPU vendor: GARAGE DIY HYPERSCALER GPU")
-
-
-def test_fix_and_load_json():
-    # Test 1: Invalid JSON string with a trailing comma
-    invalid_json_trailing_comma = """
-    {
-      "_from_model_config": true,
-      "bos_token_id": 128000,
-      "eos_token_id": 128001,
-      "transformers_version": "4.45.0.dev0",
-      "do_sample": true,
-      "temperature": 0.6,
-      "top_p": 0.9,
-    }
-    """
-
-    expected_output_trailing_comma = {
-        "_from_model_config": True,
-        "bos_token_id": 128000,
-        "eos_token_id": 128001,
-        "transformers_version": "4.45.0.dev0",
-        "do_sample": True,
-        "temperature": 0.6,
-        "top_p": 0.9,
-    }
-
-    result_trailing_comma = fix_and_load_json(invalid_json_trailing_comma)
-    assert result_trailing_comma == expected_output_trailing_comma
-
-    # Test 2: Invalid JSON string with missing commas between properties
-    invalid_json_missing_commas = """
-    {
-      "_from_model_config": true,
-      "bos_token_id": 128000,
-      "eos_token_id": 128001,
-      "transformers_version": "4.45.0.dev0"
-      "do_sample": true,
-      "temperature": 0.6,
-      "top_p": 0.9,
-    }
-    """
-
-    expected_output_missing_commas = {
-        "_from_model_config": True,
-        "bos_token_id": 128000,
-        "eos_token_id": 128001,
-        "transformers_version": "4.45.0.dev0",
-        "do_sample": True,
-        "temperature": 0.6,
-        "top_p": 0.9,
-    }
-
-    result_missing_commas = fix_and_load_json(invalid_json_missing_commas)
-    assert result_missing_commas == expected_output_missing_commas
-
-
-def test_select_sft_generate_example():
-    eval_mock = mock.MagicMock()
-    data_mock = mock.MagicMock()
-
-    test_dataset = {"data": [{"instruction": "Test instruction 1"}, {"instruction": "Test instruction 2"}]}
-    train_dataset = {"data": [{"instruction": "Train instruction 1"}, {"instruction": "Train instruction 2"}]}
-
-    data_mock.test_dataset.data = test_dataset["data"]
-    data_mock.train_dataset.data = train_dataset["data"]
-
-    # Test "first" instruction from test dataset
-    eval_mock.evaluate_example = "first"
-    instruction = select_sft_generate_example(eval_mock, data_mock)
-    assert instruction == "Test instruction 1"
-
-    # Test "first" instruction from train dataset when test dataset is empty
-    data_mock.test_dataset.data = []
-    instruction = select_sft_generate_example(eval_mock, data_mock)
-    assert instruction == "Train instruction 1"
-
-    # Test random selection from test dataset
-    eval_mock.evaluate_example = "random"
-    data_mock.test_dataset.data = [{"instruction": "Test instruction 1"}, {"instruction": "Test instruction 2"}]
-    with mock.patch("random.randint", return_value=1):
-        instruction = select_sft_generate_example(eval_mock, data_mock)
-        assert instruction == "Test instruction 2"
-
-    # Test random selection from train dataset when test dataset is empty
-    data_mock.test_dataset.data = []
-    with mock.patch("random.randint", return_value=1):
-        instruction = select_sft_generate_example(eval_mock, data_mock)
-        assert instruction == "Train instruction 2"
-
-    # Test specific index from test dataset
-    eval_mock.evaluate_example = 1
-    data_mock.test_dataset.data = [{"instruction": "Test instruction 1"}, {"instruction": "Test instruction 2"}]
-    instruction = select_sft_generate_example(eval_mock, data_mock)
-    assert instruction == "Test instruction 2"
-
-    # Test specific index from train dataset when test dataset has fewer elements
-    data_mock.test_dataset.data = [{"instruction": "Test instruction 1"}]
-    instruction = select_sft_generate_example(eval_mock, data_mock)
-    assert instruction == "Train instruction 2"
-
-    # Test out-of-range index
-    eval_mock.evaluate_example = 2
-    data_mock.test_dataset.data = [{"instruction": "Test instruction 1"}]
-    data_mock.train_dataset.data = [{"instruction": "Train instruction 1"}]
-    with pytest.raises(IndexError):
-        select_sft_generate_example(eval_mock, data_mock)
-
-    # Test unknown evaluation type
-    eval_mock.evaluate_example = "unknown"
-    with pytest.raises(ValueError):
-        select_sft_generate_example(eval_mock, data_mock)
