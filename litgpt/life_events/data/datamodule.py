@@ -68,13 +68,13 @@ class LifeEventsDataModule(DataModule):
     force_prepare: bool = False
     """Rebuild the cache even when it already exists."""
 
-    id_column: str = "ID"
+    id_column: str = "PERSON_ID"
     """Name of the individual identifier column, in both dataset kinds."""
-    time_column: str = "TIME"
+    time_column: str = "DATE"
     """Name of the event date column."""
     event_column: str = "EVENT"
     """Name of the event label column."""
-    notes_column: str = "NOTES"
+    notes_column: str = "NOTE"
     """Name of the per-event attribute column. Read only for `notes_fields`."""
     birthdate_column: str = "BIRTHDATE"
     """Name of the birthdate column in the person dataset."""
