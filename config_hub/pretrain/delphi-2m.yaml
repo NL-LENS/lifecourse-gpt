@@ -6,7 +6,7 @@
 # See README.md for the data format and for training on your own datasets.
 
 # Delphi's architecture, from `litgpt.config`, spelled out under ``model_config`` so it
-# can be changed: ``model_config`` replaces a named config wholesale. The vocabulary is
+# can be changed: ``model_config`https://github.com/NL-LENS/data-pipeline/pull/73` replaces a named config wholesale. The vocabulary is
 # not set here; `litgpt pretrain` reads `vocab_size`, `padded_vocab_size` and
 # `target_vocab_size` from the data cache.
 model_name: delphi-2m
@@ -49,9 +49,11 @@ data:
   class_path: DelphiLifeEvents
   init_args:
     event_paths:
-      - data/dummy_life_events/work_education.parquet
-      - data/dummy_life_events/civil_registry.parquet
-    person_path: data/dummy_life_events/persons.parquet
+      - ../data_pipeline_test/data/lake/silver/INPA/*.parquet
+      - ../data_pipeline_test/data/lake/silver/JOB_END/*.parquet
+      - ../data_pipeline_test/data/lake/silver/JOB_START/*.parquet
+      - ../data_pipeline_test/data/lake/silver/INPA/*.parquet
+    person_path: ../data_pipeline_test/data/lake/silver/person_static.parquet
     # Preprocessed sequences land here. Delete the directory to force a rebuild.
     cache_dir: data/dummy_life_events/cache
     # Fraction of individuals held out, never a fraction of rows.
