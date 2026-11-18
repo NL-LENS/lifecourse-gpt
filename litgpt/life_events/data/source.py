@@ -191,14 +191,50 @@ _INTEGER_ID_TYPES = frozenset({"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTIN
 both can hold values that do not fit, and a silent overflow would merge two individuals."""
 
 
-def _id_sql_type(con: Any, entries: Sequence[str], person_path: str | None, id_column: str) -> str:
-    """`BIGINT` when every dataset stores `ID` as an integer, `VARCHAR` otherwise.
+def _id_part(con: Any, entry: str, id_column: str, id_field: str | None) -> tuple[str, str]:
+    """SQL reading the individual's identifier out of one dataset, and the type it reads as.
+
+    Without `id_field`, or when `id_column` holds a plain value, the column is the identifier.
+    When `id_column` is a struct or map, it is a composite key and `id_field` names the part
+    that identifies the individual. The other parts are dropped. Like `_note_expr`, this is
+    decided per dataset, so datasets with and without a composite key can be merged.
+    """
+    column_type = _column_types(con, entry).get(id_column)
+    column = _quote_ident(id_column)
+    kind = None if column_type is None else column_type.id
+    if kind not in ("struct", "map"):
+        return column, str(column_type)
+    if id_field is None:
+        # `CAST(... AS VARCHAR)` would turn every (individual, other part) pair into an
+        # individual of its own, and split each life course into fragments.
+        raise ValueError(f"{entry}: {id_column} is a composite key ({column_type}). Set `id_field`.")
+    children = dict(column_type.children)
+    key = _quote_literal(id_field)
+    if kind == "map":
+        return f"element_at({column}, {key})[1]", str(children["value"])
+    if id_field not in children:
+        raise ValueError(f"{entry}: {id_column} ({column_type}) has no field {id_field!r}")
+    return f"struct_extract({column}, {key})", str(children[id_field])
+
+
+def _id_sql_type(
+    con: Any,
+    entries: Sequence[str],
+    person_path: str | None,
+    id_column: str,
+    static_id_column: str,
+    id_field: str | None = None,
+) -> str:
+    """`BIGINT` when every dataset stores the identifier as an integer, `VARCHAR` otherwise.
 
     Two "silver" layer event datasets may disagree on the type of `ID`, and `VARCHAR` is the one common
-    type that cannot lose information.
+    type that cannot lose information. For a composite key, the type of the `id_field` part counts.
     """
-    for entry in [*entries, *([person_path] if person_path is not None else [])]:
-        if str(_column_types(con, entry).get(id_column)) not in _INTEGER_ID_TYPES:
+    sources = [(entry, id_column) for entry in entries]
+    if person_path is not None:
+        sources.append((person_path, static_id_column))
+    for entry, column in sources:
+        if _id_part(con, entry, column, id_field)[1] not in _INTEGER_ID_TYPES:
             return "VARCHAR"
     return "BIGINT"
 
@@ -233,6 +269,7 @@ def _event_relation(
     id_type: str,
     notes_column: str = "NOTES",
     notes_fields: Mapping[str, NoteField] | None = None,
+    id_field: str | None = None,
 ) -> Any:
     """One projected relation per event dataset, merged with `UNION ALL`.
 
@@ -250,8 +287,9 @@ def _event_relation(
     notes_fields = notes_fields or {}
     relations = []
     for entry in entries:
+        id_sql, _ = _id_part(con, entry, id_column, id_field)
         projection = [
-            f"CAST({_quote_ident(id_column)} AS {id_type}) AS id",
+            f"CAST({id_sql} AS {id_type}) AS id",
             f"CAST({_quote_ident(time_column)} AS DATE) AS time",
             f"CAST({_quote_ident(event_column)} AS VARCHAR) AS event",
         ]
@@ -409,6 +447,8 @@ def build_event_cache(
     min_time: int | None = None,
     vocab_path: Path | None = None,
     id_column: str = "ID",
+    id_field: str | None = None,
+    static_id_column: str | None = None,
     time_column: str = "TIME",
     event_column: str = "EVENT",
     notes_column: str = "NOTES",
@@ -451,18 +491,22 @@ def build_event_cache(
 
     con = _connect_duckdb(duckdb_threads, duckdb_memory_limit, duckdb_temp_directory)
     try:
-        id_type = _id_sql_type(con, event_paths, None if person_path is None else str(person_path), id_column)
+        static_id_column = static_id_column or id_column
+        id_type = _id_sql_type(
+            con, event_paths, None if person_path is None else str(person_path), id_column, static_id_column, id_field
+        )
         _event_relation(
-            con, event_paths, id_column, time_column, event_column, id_type, notes_column, notes_fields
+            con, event_paths, id_column, time_column, event_column, id_type, notes_column, notes_fields, id_field
         ).create_view("_silver")
         if person_path is not None:
             statics_sql = "".join(
                 f", CAST({_quote_ident(field)} AS VARCHAR) AS {column}"
                 for field, column in zip(static_fields, static_columns)
             )
+            person_id_sql, _ = _id_part(con, str(person_path), static_id_column, id_field)
             con.execute(
                 f"CREATE TEMP TABLE _persons AS SELECT "
-                f"CAST({_quote_ident(id_column)} AS {id_type}) AS id, "
+                f"CAST({person_id_sql} AS {id_type}) AS id, "
                 f"CAST({_quote_ident(birthdate_column)} AS DATE) AS birthdate{statics_sql} "
                 f"FROM read_parquet(?)",
                 [_expand_entry(str(person_path))],
@@ -639,6 +683,7 @@ def build_event_cache(
         },
         "statics": static_fields,
         "id_type": id_type,
+        "id": {"column": id_column, "field": id_field, "static_column": static_id_column},
         "sources": {"events": list(event_paths), "persons": None if person_path is None else str(person_path)},
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }

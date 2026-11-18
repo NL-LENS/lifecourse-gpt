@@ -578,3 +578,76 @@ def test_static_fields_need_a_person_dataset_and_a_matching_cache(tmp_path, data
     stale = make_module(tmp_path, static_dataset)
     with pytest.raises(ValueError, match="was built with static_fields"):
         stale.setup()
+
+
+def _write_composite_id_parquet(path, rows, id_sql="{{'person_id': {i}, 'episode': {n}}}"):
+    """rows: (person id, episode, iso date, event), with `ID` a composite key built by `id_sql`."""
+    values = ", ".join(f"({id_sql.format(i=i, n=n)}, DATE '{t}', '{e}', {{'a': 1}})" for i, n, t, e in rows)
+    duckdb.connect().execute(
+        f"COPY (SELECT * FROM (VALUES {values}) AS t(ID, TIME, EVENT, NOTES)) TO '{path}' (FORMAT PARQUET)"
+    )
+    return path
+
+
+_COMPOSITE_ROWS = [
+    (1, 0, "2010-01-01", "study"),
+    (1, 1, "2015-01-01", "job"),
+    (1, 2, "2020-01-01", "move"),
+    (2, 0, "2012-01-01", "study"),
+    (2, 1, "2018-01-01", "job"),
+]
+
+
+def test_composite_struct_id_is_reduced_to_the_person_part(tmp_path):
+    events = _write_composite_id_parquet(tmp_path / "events.parquet", _COMPOSITE_ROWS)
+    persons = write_int_persons(tmp_path / "persons.parquet", {1: "2000-01-01", 2: "1995-01-01"})
+    data = prepared(tmp_path, ([str(events)], persons), id_field="person_id", val_split_fraction=0.5)
+    # One sequence per person, not one per (person, episode) pair.
+    assert np.asarray(data._store.ids).tolist() == [1, 2]
+    assert meta(data)["n_events"] == 5
+    # The `person_id` part is an integer, so the ids stay integers.
+    assert meta(data)["id_type"] == "BIGINT"
+    assert [data.vocab.itos[t] for t in _sequence_of(data, 1)["tokens"].tolist()] == ["study", "job", "move"]
+
+
+def test_composite_and_plain_ids_can_be_merged(tmp_path):
+    composite = _write_composite_id_parquet(tmp_path / "composite.parquet", _COMPOSITE_ROWS)
+    plain = write_int_id_parquet(tmp_path / "plain.parquet", [(1, "2022-01-01", "marriage")])
+    persons = write_int_persons(tmp_path / "persons.parquet", {1: "2000-01-01", 2: "1995-01-01"})
+    data = prepared(tmp_path, ([str(composite), str(plain)], persons), id_field="person_id", val_split_fraction=0.5)
+    assert meta(data)["n_events"] == 6
+    assert data.vocab.itos[_sequence_of(data, 1)["tokens"].tolist()[-1]] == "marriage"
+
+
+def test_composite_map_id_is_reduced_to_the_person_part(tmp_path):
+    events = _write_composite_id_parquet(
+        tmp_path / "events.parquet", _COMPOSITE_ROWS, id_sql="MAP {{'person_id': {i}, 'episode': {n}}}"
+    )
+    persons = write_int_persons(tmp_path / "persons.parquet", {1: "2000-01-01", 2: "1995-01-01"})
+    data = prepared(tmp_path, ([str(events)], persons), id_field="person_id", val_split_fraction=0.5)
+    assert np.asarray(data._store.ids).tolist() == [1, 2]
+    assert meta(data)["n_events"] == 5
+
+
+def test_composite_id_without_id_field_fails_loudly(tmp_path):
+    events = _write_composite_id_parquet(tmp_path / "events.parquet", _COMPOSITE_ROWS)
+    persons = write_int_persons(tmp_path / "persons.parquet", {1: "2000-01-01", 2: "1995-01-01"})
+    with pytest.raises(ValueError, match="composite key"):
+        make_module(tmp_path, ([str(events)], persons)).prepare_data()
+    with pytest.raises(ValueError, match="no field 'person'"):
+        make_module(tmp_path, ([str(events)], persons), id_field="person").prepare_data()
+
+
+def test_static_id_column_may_differ_from_the_event_id_column(tmp_path):
+    """The other common shape of a composite key: two plain columns side by side."""
+    values = ", ".join(f"({i}, {n}, DATE '{t}', '{e}')" for i, n, t, e in _COMPOSITE_ROWS)
+    events = tmp_path / "events.parquet"
+    duckdb.connect().execute(
+        f"COPY (SELECT * FROM (VALUES {values}) AS t(PERSON_ID, EPISODE_ID, TIME, EVENT)) TO '{events}' (FORMAT PARQUET)"
+    )
+    persons = write_int_persons(tmp_path / "persons.parquet", {1: "2000-01-01", 2: "1995-01-01"})
+    data = prepared(
+        tmp_path, ([str(events)], persons), id_column="PERSON_ID", static_id_column="ID", val_split_fraction=0.5
+    )
+    assert np.asarray(data._store.ids).tolist() == [1, 2]
+    assert meta(data)["n_events"] == 5

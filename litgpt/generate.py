@@ -276,6 +276,8 @@ def _encode_prompts(
         min_time=data.min_time,
         vocab_path=vocab_path,
         id_column=data.id_column,
+        id_field=data.id_field,
+        static_id_column=data.static_id_column,
         time_column=data.time_column,
         event_column=data.event_column,
         birthdate_column=data.birthdate_column,
