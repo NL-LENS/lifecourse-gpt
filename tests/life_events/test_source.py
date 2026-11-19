@@ -5,14 +5,18 @@
 
 import json
 import pickle
+import shutil
 
 import numpy as np
 import pytest
+import torch
+from torch.utils.data import DataLoader
 
 duckdb = pytest.importorskip("duckdb")
 
 from litgpt.life_events.data import EventVocab, NoteField  # noqa: E402
 from litgpt.life_events.data.source import _INTEGER_ID_TYPES, _token_dtype  # noqa: E402
+from litgpt.life_events.data.store import SequenceStore  # noqa: E402
 
 from .helpers import (  # noqa: E402
     PlainLifeEvents,
@@ -186,6 +190,42 @@ def test_empty_val_split_raises(tmp_path, dataset):
 def test_dataloader_is_picklable(tmp_path, dataset):
     data = prepared(tmp_path, dataset)
     pickle.loads(pickle.dumps(data.train_dataloader().collate_fn))
+
+
+def test_mapped_store_pickles_as_a_reference_to_its_cache(tmp_path, dataset):
+    store = prepared(tmp_path, dataset)._store
+    restored = pickle.loads(pickle.dumps(store))
+    # Mapped from the same file again rather than carried in the pickle, which a "spawn"
+    # worker would otherwise receive in full: by value, a memmap unpickles without a file.
+    assert restored.tokens.filename == store.tokens.filename
+    for name in ("ids", "offsets", "tokens", "times", "time_offsets", "statics"):
+        np.testing.assert_array_equal(getattr(restored, name), getattr(store, name))
+    assert restored.vocab.itos == store.vocab.itos
+
+
+def test_in_memory_store_pickles_by_value(tmp_path, dataset):
+    # A copy of the cache, since `prepared`'s own store keeps the original mapped, and Windows
+    # cannot delete a mapped file.
+    cache_dir = shutil.copytree(prepared(tmp_path, dataset).cache_dir, tmp_path / "copy")
+    store = SequenceStore.load(cache_dir, mmap=False)
+    payload = pickle.dumps(store)
+    shutil.rmtree(cache_dir)
+    np.testing.assert_array_equal(pickle.loads(payload).tokens, store.tokens)
+
+
+def test_spawned_dataloader_workers_map_the_cache(tmp_path, dataset):
+    data = prepared(tmp_path, dataset)
+
+    def batches(**kwargs):
+        loader = DataLoader(data.train_dataset, batch_size=2, collate_fn=data.collate_fn(), **kwargs)
+        return [sample for batch in loader for sample in batch]
+
+    # "spawn" pickles the dataset into each worker, as every Windows dataloader worker does.
+    spawned = batches(num_workers=1, multiprocessing_context="spawn")
+    for got, expected in zip(spawned, batches(num_workers=0), strict=True):
+        assert got.keys() == expected.keys()
+        for key in got:
+            assert torch.equal(got[key], expected[key])
 
 
 def test_tokens_are_stored_narrow(tmp_path, dataset):

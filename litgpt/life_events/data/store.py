@@ -5,7 +5,7 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -45,6 +45,8 @@ class SequenceStore:
             to put them.
         static_fields: The person-dataset columns `statics` was read from, in column order.
         vocab: The event vocabulary.
+        cache_dir: The cache `load` opened, as an absolute path; `None` for a store built in memory.
+        mmap: Whether the arrays are memory-mapped from `cache_dir`.
     """
 
     ids: np.ndarray
@@ -59,6 +61,8 @@ class SequenceStore:
     statics: np.ndarray
     static_fields: tuple[str, ...]
     vocab: EventVocab
+    cache_dir: Path | None = field(default=None, compare=False)
+    mmap: bool = field(default=False, compare=False)
 
     @classmethod
     def load(cls, cache_dir: Path, specials: Sequence[str] | None = None, mmap: bool = True) -> "SequenceStore":
@@ -91,7 +95,21 @@ class SequenceStore:
             statics=load(cache_dir / "statics.npy"),
             static_fields=tuple(meta["statics"]),
             vocab=EventVocab.load(cache_dir / "vocab.json", specials),
+            # Absolute, so a process that unpickles the store finds the cache from any directory.
+            cache_dir=cache_dir.absolute(),
+            mmap=mmap,
         )
+
+    def __reduce_ex__(self, protocol):
+        # A memory-mapped store is a view of its cache files, so it pickles as a reference to
+        # them. By value, every dataloader worker started with "spawn" (the Windows default)
+        # would receive its own copy of every array through a pipe, which at registry scale
+        # exhausts memory or breaks the transfer ("pickle data was truncated"); instead each
+        # worker maps the files itself and shares the page cache. A store read into memory
+        # stays by value: its files may be gone, which is why it was read into memory.
+        if self.cache_dir is None or not self.mmap:
+            return super().__reduce_ex__(protocol)
+        return SequenceStore.load, (self.cache_dir, self.vocab.specials, True)
 
     def __len__(self) -> int:
         return len(self.offsets) - 1
