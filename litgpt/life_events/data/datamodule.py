@@ -287,7 +287,7 @@ class LifeEventsDataModule(DataModule):
             generator=torch.Generator().manual_seed(self.seed),
             num_workers=self.num_workers,
             pin_memory=True,
-            # The dataloader is pickled both to checkpoint the training state and to
-            # start worker processes, hence the picklability requirement on the hook.
+            # The dataloader is pickled to start worker processes under the "spawn" start
+            # method (Windows, macOS), hence the picklability requirement on the hook.
             collate_fn=self.collate_fn(),
         )

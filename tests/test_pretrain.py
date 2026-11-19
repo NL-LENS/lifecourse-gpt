@@ -78,6 +78,8 @@ def test_pretrain_on_cpu(_, tmp_path):
     assert checkpoint_dirs.issubset(set(os.listdir(out_dir)))
     for checkpoint_dir in checkpoint_dirs:
         assert set(os.listdir(out_dir / checkpoint_dir)) == {"lit_model.pth", "model_config.yaml"}
+    # A plain `DataLoader` cannot save its position, so the checkpoint must not carry it (and its dataset).
+    assert "train_dataloader" not in torch.load(out_dir / "final" / "lit_model.pth", weights_only=False)
     assert (out_dir / "logs" / "csv" / "version_0").is_dir()
 
     logs = stdout.getvalue()
