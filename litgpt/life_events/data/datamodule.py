@@ -69,7 +69,16 @@ class LifeEventsDataModule(DataModule):
     """Rebuild the cache even when it already exists."""
 
     id_column: str = "ID"
-    """Name of the individual identifier column, in both dataset kinds."""
+    """Name of the individual identifier column in the event datasets, and in the person
+    dataset unless `static_id_column` is set."""
+    id_field: str | None = None
+    """When `id_column` is a composite key stored as a struct or map, the part that identifies
+    the individual, e.g. `"person_id"`. The other parts are dropped, so all of an individual's
+    events end up in one sequence. A dataset whose `id_column` holds a plain value is read
+    whole, so datasets with and without a composite key can be mixed."""
+    static_id_column: str | None = None
+    """Name of the individual identifier column in the person dataset, if it differs from
+    `id_column`."""
     time_column: str = "TIME"
     """Name of the event date column."""
     event_column: str = "EVENT"
@@ -210,6 +219,8 @@ class LifeEventsDataModule(DataModule):
             specials=self.specials,
             vocab_path=self.vocab_path,
             id_column=self.id_column,
+            id_field=self.id_field,
+            static_id_column=self.static_id_column,
             time_column=self.time_column,
             event_column=self.event_column,
             notes_column=self.notes_column,
@@ -276,7 +287,7 @@ class LifeEventsDataModule(DataModule):
             generator=torch.Generator().manual_seed(self.seed),
             num_workers=self.num_workers,
             pin_memory=True,
-            # The dataloader is pickled both to checkpoint the training state and to
-            # start worker processes, hence the picklability requirement on the hook.
+            # The dataloader is pickled to start worker processes under the "spawn" start
+            # method (Windows, macOS), hence the picklability requirement on the hook.
             collate_fn=self.collate_fn(),
         )

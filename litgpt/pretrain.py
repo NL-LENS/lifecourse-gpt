@@ -251,6 +251,10 @@ def main(
     optimizer = fabric.setup_optimizers(optimizer)
 
     train_dataloader, val_dataloader = get_dataloaders(data)
+    # Fabric restores a dataloader's position only through `state_dict`/`load_state_dict`. Any
+    # other, such as a plain `DataLoader`, it would pickle whole into every checkpoint -- dataset
+    # included, past 4 GiB of which `torch.save`'s pickle protocol 2 fails -- and drop on resume.
+    resumable_dataloader = hasattr(train_dataloader, "state_dict") and hasattr(train_dataloader, "load_state_dict")
     train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
     if initial_checkpoint_dir:
@@ -259,10 +263,11 @@ def main(
     state = {
         "model": model,
         "optimizer": optimizer,
-        "train_dataloader": train_dataloader,
         "iter_num": 0,
         "step_count": 0,
     }
+    if resumable_dataloader:
+        state["train_dataloader"] = train_dataloader
 
     resume = find_resume_path(resume, out_dir)
     if resume:
